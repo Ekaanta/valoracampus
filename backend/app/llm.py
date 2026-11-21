@@ -28,6 +28,7 @@ class Provider:
     model: str
     paid: bool = False
     cost_note: str = ""
+    timeout: float = 90  # seconds to wait for the first byte before failing over
     ok_count: int = 0
     fail_count: int = 0
     last_error: str = ""
@@ -38,7 +39,7 @@ class Provider:
     def client(self) -> OpenAI:
         if self._client is None:
             self._client = OpenAI(base_url=self.base_url, api_key=self.api_key or "none",
-                                  timeout=90, max_retries=0)
+                                  timeout=self.timeout, max_retries=0)
         return self._client
 
     def status(self) -> dict:
@@ -75,10 +76,13 @@ class LLMRouter:
     def __init__(self) -> None:
         self.free: list[Provider] = []
         if settings.freellmapi_key:
+            # FreeLLMAPI does its own failover across free providers within ~45 s;
+            # if it still has nothing by then, SIMON moves on to the local model.
             self.free.append(Provider("FreeLLMAPI", settings.freellmapi_url,
-                                      settings.freellmapi_key, settings.freellmapi_model))
+                                      settings.freellmapi_key, settings.freellmapi_model, timeout=50))
         if settings.ollama_model:
-            self.free.append(Provider("Ollama (local)", settings.ollama_url, "ollama", settings.ollama_model))
+            self.free.append(Provider("Ollama (local)", settings.ollama_url, "ollama", settings.ollama_model,
+                                      timeout=240))
         self.paid: Provider | None = None
         if settings.paid_url and settings.paid_key and settings.paid_model:
             self.paid = Provider(settings.paid_name or "Paid provider", settings.paid_url,
@@ -132,13 +136,15 @@ class LLMRouter:
         self._exhausted(errors, allow_paid)
 
     def stream(self, messages: list[dict], tools: list | None = None, allow_paid: bool = False) -> Iterator[tuple[str, Any]]:
-        """Yields ("provider", Provider) once, then ("chunk", chunk) items.
+        """Yields ("trying", Provider) and ("failover", Provider) progress items,
+        ("provider", Provider) once a provider answers, then ("chunk", chunk) items.
 
         Failover happens only before the first chunk arrives; after that the
         answer is already reaching the user.
         """
         errors: list[str] = []
         for p in self._candidates(allow_paid):
+            yield "trying", p
             try:
                 stream = p.client().chat.completions.create(**self._args(p, messages, tools, stream=True))
                 iterator = iter(stream)
@@ -146,10 +152,12 @@ class LLMRouter:
             except StopIteration:
                 self._fail(p, RuntimeError("empty response"))
                 errors.append(f"{p.name}: empty response")
+                yield "failover", p
                 continue
             except Exception as err:
                 self._fail(p, err)
                 errors.append(f"{p.name}: {_short(err)}")
+                yield "failover", p
                 continue
             self._ok(p)
             yield "provider", p

@@ -95,7 +95,7 @@ def execute_action(action_id: int) -> dict:
             result = REGISTRY[action.tool].run(action.args, ToolContext(conversation_id=action.conversation_id))
         except Exception as err:
             result = {"error": f"{type(err).__name__}: {err}"}
-        action.status = "failed" if "error" in result else "done"
+        action.status = "failed" if "error" in result or result.get("executed") is False else "done"
         action.result, action.decided_at = result, utcnow()
         s.commit()
         out = {"action_id": action.id, "status": action.status, "summary": action.summary, "result": result}

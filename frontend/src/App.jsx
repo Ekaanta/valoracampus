@@ -171,8 +171,9 @@ function ChatView({ me, convId, setConvId, onChanged }) {
           convRef.current = ev.id
           setConvId(ev.id)
         }
+        else if (ev.type === 'status') patchLast((m) => ({ ...m, status: ev.text }))
         else if (ev.type === 'provider') patchLast((m) => ({ ...m, provider: ev.name, model: ev.model }))
-        else if (ev.type === 'token') { reply += ev.text; patchLast((m) => ({ ...m, content: m.content + ev.text })) }
+        else if (ev.type === 'token') { reply += ev.text; patchLast((m) => ({ ...m, status: null, content: m.content + ev.text })) }
         else if (ev.type === 'tool') patchLast((m) => ({ ...m, tools: [...m.tools.filter((t) => t.name !== ev.name), ev] }))
         else if (['chart', 'link', 'approval'].includes(ev.type)) patchLast((m) => ({ ...m, cards: [...(m.cards || []), ev] }))
         else if (ev.type === 'paid_required') patchLast((m) => ({ ...m, paid: ev }))
@@ -261,7 +262,9 @@ function ChatView({ me, convId, setConvId, onChanged }) {
             )}
             {m.error && <div className="error">{m.error}</div>}
             {m.role === 'assistant' && m.provider && <div className="meta">{m.provider} · {m.model}</div>}
-            {m.role === 'assistant' && !m.content && busy && i === messages.length - 1 && !m.error && <div className="typing"><i /><i /><i /></div>}
+            {m.role === 'assistant' && !m.content && busy && i === messages.length - 1 && !m.error && (
+              <><div className="typing"><i /><i /><i /></div>{m.status && <div className="meta">{m.status}</div>}</>
+            )}
           </div>
         ))}
         {interim && <div className="msg user interim"><div className="bubble">{interim}</div></div>}

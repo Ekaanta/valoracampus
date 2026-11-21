@@ -15,24 +15,34 @@ from sqlalchemy import or_, select
 
 from .db import Memory, Message, SessionLocal, log_activity, utcnow
 
-EXTRACT_PROMPT = """You maintain the long-term memory of a personal AI assistant.
+EXTRACT_SYSTEM = """You maintain the long-term memory of a personal AI assistant.
+From the USER's message, extract durable facts about the user worth remembering for weeks or months:
+name and how they want to be addressed, where they live, preferences, interests, habits, family,
+work, ongoing projects, decisions, important dates, recurring activities.
+Write each fact as a short sentence starting with "User". Skip small talk, questions about the
+world, and facts already stored. If a fact updates an existing memory, set "replaces" to its id.
+Answer ONLY with JSON in exactly this shape.
 
-Existing memories (id: content):
+Example
+USER: I'm Anna, please call me Annie. I work as a nurse and I hate mornings.
+JSON: {"facts": [{"content": "User's name is Anna; prefers to be called Annie", "category": "profile", "replaces": null}, {"content": "User works as a nurse", "category": "profile", "replaces": null}, {"content": "User dislikes mornings", "category": "preference", "replaces": null}]}
+
+Example
+USER: What's the weather tomorrow?
+JSON: {"facts": []}
+
+Example
+USER: Good morning, SIMON!
+JSON: {"facts": []}
+
+Note: SIMON is the assistant's own name, never the user's."""
+
+EXTRACT_PROMPT = """Existing memories (id: content):
 {existing}
 
-New exchange:
 USER: {user}
 ASSISTANT: {assistant}
-
-Extract NEW durable facts about the user that are worth remembering for weeks or months:
-name and how they want to be addressed, preferences, habits, family, work, ongoing projects,
-decisions, important dates, recurring activities. Ignore small talk, one-off questions,
-facts about the world, and anything already stored. If a new fact corrects or updates an
-existing memory, set "replaces" to that memory id.
-
-Answer ONLY with JSON, no other text:
-{{"facts": [{{"content": "...", "category": "profile|preference|project|decision|task|other", "replaces": null}}]}}
-If there is nothing new, answer {{"facts": []}}"""
+JSON:"""
 
 CATEGORIES = {"profile", "preference", "project", "decision", "task", "other"}
 
@@ -88,7 +98,8 @@ def extract_and_store(user_text: str, assistant_text: str) -> None:
     existing = "\n".join(f"{m.id}: {m.content}" for m in recent_memories(120)) or "(none)"
     prompt = EXTRACT_PROMPT.format(existing=existing, user=user_text[:3000], assistant=assistant_text[:2000])
     try:
-        resp, _ = router.complete([{"role": "user", "content": prompt}], temperature=0)
+        resp, _ = router.complete([{"role": "system", "content": EXTRACT_SYSTEM},
+                                   {"role": "user", "content": prompt}], temperature=0)
     except Exception:
         return  # memory extraction never uses paid providers and never breaks the chat
     facts = _parse_json(resp.choices[0].message.content or "").get("facts") or []

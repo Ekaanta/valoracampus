@@ -97,6 +97,12 @@ def run_turn(conversation_id: int, user_text: str | None, allow_paid: bool = Fal
             text_parts: list[str] = []
             calls: dict[int, dict] = {}
             for kind, item in router.stream(messages, tools=schemas(), allow_paid=allow_paid):
+                if kind == "trying":
+                    yield {"type": "status", "text": f"Thinking with {item.name}…"}
+                    continue
+                if kind == "failover":
+                    yield {"type": "status", "text": f"{item.name} is busy, switching to the next AI provider…"}
+                    continue
                 if kind == "provider":
                     provider = item
                     yield {"type": "provider", "name": item.name, "model": item.model, "paid": item.paid}
