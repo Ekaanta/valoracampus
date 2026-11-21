@@ -1,0 +1,58 @@
+# Local development:  docker compose up -d            (db + ollama + freellmapi)
+# On the server:      docker compose --profile app up -d --build   (also runs SIMON itself)
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: simon
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-simon}
+      POSTGRES_DB: simon
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+
+  freellmapi:
+    image: ghcr.io/tashfeenahmed/freellmapi:latest
+    restart: unless-stopped
+    env_file:
+      - services/freellmapi.env
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+    ports:
+      - "127.0.0.1:3001:3001"
+    volumes:
+      - freellmapi-data:/app/server/data
+
+  simon:
+    build: .
+    profiles: ["app"]
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://simon:${POSTGRES_PASSWORD:-simon}@db:5432/simon
+      FREELLMAPI_URL: http://freellmapi:3001/v1
+      OLLAMA_URL: http://ollama:11434/v1
+      FRONTEND_DIST: /app/frontend/dist
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      - db
+      - freellmapi
+      - ollama
+
+volumes:
+  db-data:
+  ollama-data:
+  freellmapi-data:

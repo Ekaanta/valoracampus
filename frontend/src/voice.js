@@ -1,0 +1,92 @@
+import { transcribe, ttsAudio } from './api.js'
+
+const Recognition = typeof window !== 'undefined' && (window.SpeechRecognition || window.webkitSpeechRecognition)
+
+/**
+ * Listens once and resolves with the spoken text.
+ * Uses the browser's built-in recognition (Chrome, Edge, Safari); otherwise records
+ * audio and sends it to the server (FreeLLMAPI speech-to-text).
+ */
+export function listen(lang, { onInterim } = {}) {
+  if (Recognition) {
+    let rec
+    const promise = new Promise((resolve, reject) => {
+      rec = new Recognition()
+      rec.lang = lang
+      rec.interimResults = true
+      rec.continuous = false
+      let finalText = ''
+      rec.onresult = (e) => {
+        let interim = ''
+        for (const r of e.results) {
+          if (r.isFinal) finalText = r[0].transcript
+          else interim += r[0].transcript
+        }
+        onInterim?.(finalText || interim)
+      }
+      rec.onerror = (e) => (e.error === 'no-speech' || e.error === 'aborted' ? resolve('') : reject(new Error(e.error)))
+      rec.onend = () => resolve(finalText.trim())
+      rec.start()
+    })
+    return { promise, stop: () => rec?.stop() }
+  }
+  return recordAndTranscribe()
+}
+
+function recordAndTranscribe() {
+  let recorder
+  const promise = (async () => {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    recorder = new MediaRecorder(stream)
+    const chunks = []
+    recorder.ondataavailable = (e) => chunks.push(e.data)
+    const stopped = new Promise((r) => (recorder.onstop = r))
+    recorder.start()
+    setTimeout(() => recorder.state === 'recording' && recorder.stop(), 15000)
+    await stopped
+    stream.getTracks().forEach((t) => t.stop())
+    return transcribe(new Blob(chunks, { type: recorder.mimeType }))
+  })()
+  return { promise, stop: () => recorder?.state === 'recording' && recorder.stop() }
+}
+
+let current = null
+
+export function stopSpeaking() {
+  if (current) { current.pause(); current = null }
+  window.speechSynthesis?.cancel()
+}
+
+function plain(text) {
+  return text
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/\[Action #\d+[^\]]*\]/g, '')
+    .replace(/[*_#>`]/g, '')
+    .replace(/https?:\/\/\S+/g, 'link')
+    .trim()
+}
+
+/** Speaks text with the server's natural voice; falls back to the browser voice. Resolves when done. */
+export async function speak(text, lang) {
+  stopSpeaking()
+  const clean = plain(text)
+  if (!clean) return
+  try {
+    const url = URL.createObjectURL(await ttsAudio(clean))
+    const audio = new Audio(url)
+    current = audio
+    await new Promise((resolve) => {
+      audio.onended = audio.onerror = audio.onpause = resolve
+      audio.play().catch(resolve)
+    })
+    URL.revokeObjectURL(url)
+  } catch {
+    if (!window.speechSynthesis) return
+    await new Promise((resolve) => {
+      const u = new SpeechSynthesisUtterance(clean)
+      u.lang = lang
+      u.onend = u.onerror = resolve
+      window.speechSynthesis.speak(u)
+    })
+  }
+}

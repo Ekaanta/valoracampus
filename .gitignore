@@ -1,0 +1,9 @@
+.env
+services/freellmapi.env
+services/freellmapi/
+__pycache__/
+*.pyc
+.venv/
+node_modules/
+frontend/dist/
+*.log
