@@ -9,7 +9,7 @@ RUN npm run build
 # 2) run the API and serve the built web app
 FROM python:3.11-slim
 WORKDIR /app/backend
-COPY backend/requirements.txt ./
+COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 COPY backend/ ./
 COPY --from=web /web/dist /app/frontend/dist

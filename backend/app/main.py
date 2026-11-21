@@ -28,10 +28,11 @@ app = FastAPI(title="SIMON")
 app.add_middleware(CORSMiddleware, allow_origins=[o.strip() for o in settings.cors_origins.split(",")],
                    allow_methods=["*"], allow_headers=["*"])
 
-
-@app.on_event("startup")
-def _startup() -> None:
+# Create tables on import: serverless platforms do not always run startup events.
+try:
     init_db()
+except Exception as err:  # the API still starts; /api/health reports the problem
+    print(f"[SIMON] database not ready: {err}")
 
 
 # ------------------------------------------------------------------ auth
@@ -57,7 +58,13 @@ def auth(authorization: str = Header(default="")) -> None:
 
 @app.get("/api/health")
 def health():
-    return {"ok": True}
+    try:
+        with SessionLocal() as s:
+            s.execute(select(1))
+        db = "ok"
+    except Exception as err:
+        db = f"error: {type(err).__name__}"
+    return {"ok": db == "ok", "database": db, "ai_providers": [p["name"] for p in router.status()]}
 
 
 @app.get("/api/me", dependencies=[Depends(auth)])
@@ -255,11 +262,11 @@ async def tts(body: TTSIn):
 
 @app.post("/api/stt", dependencies=[Depends(auth)])
 async def stt(file: UploadFile = File(...)):
-    """Fallback speech-to-text for browsers without built-in recognition (via FreeLLMAPI)."""
-    if not router.free or router.free[0].name != "FreeLLMAPI":
-        raise HTTPException(503, "Speech-to-text needs FreeLLMAPI")
+    """Fallback speech-to-text for browsers without built-in recognition (FreeLLMAPI or Groq Whisper)."""
+    client = router.stt_client()
+    if not client:
+        raise HTTPException(503, "Speech-to-text needs FreeLLMAPI or a Groq key")
     data = await file.read()
-    client = router.free[0].client()
     result = await asyncio.to_thread(client.audio.transcriptions.create, model=settings.stt_model,
                                      file=(file.filename or "audio.webm", data))
     return {"text": result.text}

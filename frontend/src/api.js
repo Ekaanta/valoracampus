@@ -63,7 +63,8 @@ export async function ttsAudio(text) {
 
 export async function transcribe(blob) {
   const form = new FormData()
-  form.append('file', blob, 'speech.webm')
+  const ext = blob.type.includes('mp4') ? 'mp4' : blob.type.includes('ogg') ? 'ogg' : blob.type.includes('wav') ? 'wav' : 'webm'
+  form.append('file', blob, `speech.${ext}`) // iPhones record mp4, Chrome/Firefox webm or ogg
   const res = await check(await fetch('/api/stt', { method: 'POST', headers: { Authorization: `Bearer ${getToken() || ''}` }, body: form }))
   return (await res.json()).text
 }

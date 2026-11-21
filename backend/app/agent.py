@@ -168,5 +168,10 @@ def run_turn(conversation_id: int, user_text: str | None, allow_paid: bool = Fal
                           model=provider.model if provider else None,
                           meta={"cards": cards} if cards else None)
     yield {"type": "done", "message_id": msg_id, "conversation_id": conversation_id}
+    # Learn from this exchange while the connection is still open. (A background thread
+    # would be frozen on serverless hosts.) The UI already finished at "done".
     if answer:
-        memory.extract_in_background(user_text, answer)
+        try:
+            memory.extract_and_store(user_text, answer)
+        except Exception as err:
+            log_activity("memory_error", f"{type(err).__name__}: {err}")

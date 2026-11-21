@@ -1,12 +1,16 @@
 """Database models. Everything SIMON knows lives here, so every device sees the same state."""
+import os
 from datetime import datetime, timezone
 
 from sqlalchemy import JSON, DateTime, ForeignKey, String, Text, create_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
+from sqlalchemy.pool import NullPool
 
 from .config import settings
 
-engine = create_engine(settings.database_url, pool_pre_ping=True)
+# Serverless functions (Vercel) are frozen between requests, so pooled connections go stale.
+_pool = {"poolclass": NullPool} if os.environ.get("VERCEL") else {"pool_pre_ping": True}
+engine = create_engine(settings.database_url, **_pool)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
 

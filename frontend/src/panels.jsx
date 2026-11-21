@@ -1,7 +1,17 @@
 import { useEffect, useState } from 'react'
 import { api } from './api.js'
+import Icon from './icons.jsx'
 
 const CATS = ['profile', 'preference', 'project', 'decision', 'task', 'other']
+
+function PanelHead({ title, children }) {
+  return (
+    <header className="panel-head">
+      <h2 className="panel-title">{title}</h2>
+      <p className="panel-sub">{children}</p>
+    </header>
+  )
+}
 
 export function MemoryPanel() {
   const [items, setItems] = useState([])
@@ -32,43 +42,56 @@ export function MemoryPanel() {
 
   return (
     <div className="panel">
-      <p className="sub">Everything SIMON remembers about you. Edit or delete anything at any time.</p>
-      <input className="search" placeholder="Search memory…" value={q} onChange={(e) => setQ(e.target.value)} />
-      <form className="row add" onSubmit={add}>
-        <input placeholder="Add something SIMON should know…" value={draft.content}
-               onChange={(e) => setDraft({ ...draft, content: e.target.value })} />
-        <select value={draft.category} onChange={(e) => setDraft({ ...draft, category: e.target.value })}>
+      <PanelHead title="Memory">
+        What Simon knows about you, learned from your conversations. Correct or delete anything at any time.
+      </PanelHead>
+      <div className="field-search">
+        <Icon name="search" size={18} />
+        <input placeholder="Search memory" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search memory" />
+      </div>
+      <form className="add-row" onSubmit={add}>
+        <input placeholder="Tell Simon something to remember…" value={draft.content}
+               onChange={(e) => setDraft({ ...draft, content: e.target.value })} aria-label="New memory" />
+        <select value={draft.category} onChange={(e) => setDraft({ ...draft, category: e.target.value })} aria-label="Category">
           {CATS.map((c) => <option key={c}>{c}</option>)}
         </select>
-        <button>Add</button>
+        <button className="btn primary" disabled={!draft.content.trim()}>Add</button>
       </form>
-      <ul className="list">
+      <p className="count">{items.length} {items.length === 1 ? 'memory' : 'memories'}</p>
+      <ul className="rows">
         {items.map((m) => (
-          <li key={m.id}>
+          <li key={m.id} className="row">
             {editing?.id === m.id ? (
-              <div className="row">
-                <input value={editing.content} onChange={(e) => setEditing({ ...editing, content: e.target.value })} />
-                <select value={editing.category} onChange={(e) => setEditing({ ...editing, category: e.target.value })}>
+              <div className="edit-row">
+                <input value={editing.content} onChange={(e) => setEditing({ ...editing, content: e.target.value })} aria-label="Memory text" autoFocus />
+                <select value={editing.category} onChange={(e) => setEditing({ ...editing, category: e.target.value })} aria-label="Category">
                   {CATS.map((c) => <option key={c}>{c}</option>)}
                 </select>
-                <button onClick={save}>Save</button>
-                <button className="ghost" onClick={() => setEditing(null)}>Cancel</button>
+                <button className="btn primary small" onClick={save}>Save</button>
+                <button className="btn ghost small" onClick={() => setEditing(null)}>Cancel</button>
               </div>
             ) : (
               <>
                 <span className="tag">{m.category}</span>
-                <span className="grow">{m.content}</span>
-                <small>{m.source}</small>
-                <button className="ghost" onClick={() => setEditing(m)}>Edit</button>
-                <button className="ghost danger" onClick={() => remove(m.id)}>Delete</button>
+                <span className="row-text">{m.content}</span>
+                <span className="row-meta">{m.source === 'auto' ? 'learned' : 'added'}</span>
+                <span className="row-actions">
+                  <button className="icon-btn" onClick={() => setEditing(m)} aria-label="Edit"><Icon name="edit" size={18} /></button>
+                  <button className="icon-btn danger" onClick={() => remove(m.id)} aria-label="Delete"><Icon name="trash" size={18} /></button>
+                </span>
               </>
             )}
           </li>
         ))}
-        {!items.length && <li className="empty">Nothing stored yet.</li>}
+        {!items.length && <li className="empty">{q ? 'Nothing matches that search.' : 'Nothing stored yet. Simon learns as you talk.'}</li>}
       </ul>
     </div>
   )
+}
+
+const KIND_LABELS = {
+  tool: 'tool', memory: 'memory', llm_failover: 'switch', llm_error: 'error', approval_requested: 'approval',
+  approval_executed: 'confirmed', approval_rejected: 'rejected', paid_approval_needed: 'paid?', memory_error: 'error',
 }
 
 export function ActivityPanel() {
@@ -81,17 +104,17 @@ export function ActivityPanel() {
   }, [])
   return (
     <div className="panel">
-      <p className="sub">Everything SIMON did: tools used, provider switches, approvals, memories learned.</p>
-      <ul className="list log">
+      <PanelHead title="Activity">Every step Simon took: tools used, provider switches, approvals and memories learned.</PanelHead>
+      <ol className="timeline">
         {items.map((a) => (
-          <li key={a.id}>
-            <small>{new Date(a.at).toLocaleString()}</small>
-            <span className={`tag k-${a.kind}`}>{a.kind}</span>
-            <span className="grow">{a.summary}</span>
+          <li key={a.id} className={`k-${a.kind}`}>
+            <time>{new Date(a.at).toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</time>
+            <span className="kind">{KIND_LABELS[a.kind] || a.kind}</span>
+            <span className="row-text">{a.summary}</span>
           </li>
         ))}
         {!items.length && <li className="empty">No activity yet.</li>}
-      </ul>
+      </ol>
     </div>
   )
 }
@@ -106,24 +129,30 @@ export function ProvidersPanel() {
   }, [])
   return (
     <div className="panel">
-      <p className="sub">
-        Free first: FreeLLMAPI (rotates across the free cloud providers) → local Ollama → a paid model only after
-        your approval. Provider keys, quotas and the model catalog are managed in the FreeLLMAPI dashboard.
-      </p>
-      <div className="providers">
-        {items.map((p, i) => (
-          <div key={p.name} className="card provider">
-            <div className="row"><b>{i + 1}. {p.name}</b>{p.paid ? <span className="tag paid">paid · approval</span> : <span className="tag free">free</span>}</div>
-            <small>model: {p.model}</small>
-            <div className="row stats">
-              <span className={p.cooling_down ? 'dot warn' : p.last_ok_at ? 'dot ok' : 'dot'} />
-              <span>{p.cooling_down ? 'cooling down' : p.last_ok_at ? 'working' : 'not used yet'}</span>
-              <span>✓ {p.ok_count}</span><span>✗ {p.fail_count}</span>
-            </div>
-            {p.last_error && <small className="error">{p.last_error}</small>}
-          </div>
-        ))}
-      </div>
+      <PanelHead title="AI providers">
+        Free first. Simon tries these in order and moves to the next one when a provider is busy or out of quota.
+        A paid model is only used after you approve it.
+      </PanelHead>
+      <ol className="providers">
+        {items.map((p, i) => {
+          const state = p.cooling_down ? 'busy' : p.last_ok_at ? 'online' : 'standby'
+          return (
+            <li key={p.name} className="provider">
+              <span className="provider-rank">{String(i + 1).padStart(2, '0')}</span>
+              <div className="grow">
+                <div className="provider-name">{p.name} <span className={`tag ${p.paid ? 'warn' : 'ok'}`}>{p.paid ? 'paid · asks first' : 'free'}</span></div>
+                <div className="provider-model">{p.model}</div>
+                {p.last_error && p.cooling_down && <div className="provider-err">{p.last_error}</div>}
+              </div>
+              <div className="provider-stats">
+                <span className={`status ${state}`}><span className="dot" />{state}</span>
+                <span className="mono-small">{p.ok_count} ok · {p.fail_count} failed</span>
+              </div>
+            </li>
+          )
+        })}
+        {!items.length && <li className="empty">No AI provider is configured.</li>}
+      </ol>
     </div>
   )
 }

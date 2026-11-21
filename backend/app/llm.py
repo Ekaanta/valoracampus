@@ -80,6 +80,15 @@ class LLMRouter:
             # if it still has nothing by then, SIMON moves on to the local model.
             self.free.append(Provider("FreeLLMAPI", settings.freellmapi_url,
                                       settings.freellmapi_key, settings.freellmapi_model, timeout=50))
+        direct = [
+            ("Groq", "https://api.groq.com/openai/v1", settings.groq_api_key, settings.groq_model),
+            ("Google Gemini", "https://generativelanguage.googleapis.com/v1beta/openai/",
+             settings.gemini_api_key, settings.gemini_model),
+            ("OpenRouter", "https://openrouter.ai/api/v1", settings.openrouter_api_key, settings.openrouter_model),
+        ]
+        for name, url, key, model in direct:
+            if key and model:
+                self.free.append(Provider(name, url, key, model, timeout=45))
         if settings.ollama_model:
             self.free.append(Provider("Ollama (local)", settings.ollama_url, "ollama", settings.ollama_model,
                                       timeout=240))
@@ -166,6 +175,14 @@ class LLMRouter:
                 yield "chunk", chunk
             return
         self._exhausted(errors, allow_paid)
+
+    def stt_client(self) -> OpenAI | None:
+        """Speech-to-text goes through FreeLLMAPI if present, otherwise straight to Groq Whisper."""
+        if settings.freellmapi_key:
+            return OpenAI(base_url=settings.freellmapi_url, api_key=settings.freellmapi_key, timeout=60)
+        if settings.groq_api_key:
+            return OpenAI(base_url="https://api.groq.com/openai/v1", api_key=settings.groq_api_key, timeout=60)
+        return None
 
     def status(self) -> list[dict]:
         items = [p.status() for p in self.free]

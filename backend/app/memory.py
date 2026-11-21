@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import re
-import threading
 
 from sqlalchemy import or_, select
 
@@ -20,7 +19,9 @@ From the USER's message, extract durable facts about the user worth remembering 
 name and how they want to be addressed, where they live, preferences, interests, habits, family,
 work, ongoing projects, decisions, important dates, recurring activities.
 Write each fact as a short sentence starting with "User". Skip small talk, questions about the
-world, and facts already stored. If a fact updates an existing memory, set "replaces" to its id.
+world, and facts already stored. Never store actions the assistant prepared, executed or offered
+(orders, trades, reminders, searches): those are kept in the activity log, not in memory.
+If a fact updates an existing memory, set "replaces" to its id.
 Answer ONLY with JSON in exactly this shape.
 
 Example
@@ -119,7 +120,3 @@ def extract_and_store(user_text: str, assistant_text: str) -> None:
         s.commit()
     if saved:
         log_activity("memory", f"Learned {len(saved)} new fact(s)", {"facts": saved})
-
-
-def extract_in_background(user_text: str, assistant_text: str) -> None:
-    threading.Thread(target=extract_and_store, args=(user_text, assistant_text), daemon=True).start()

@@ -1,0 +1,6 @@
+services/
+docs/*.pdf
+backend/.venv/
+frontend/node_modules/
+Dockerfile
+docker-compose.yml

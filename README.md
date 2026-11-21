@@ -57,7 +57,7 @@ docker compose exec ollama ollama pull qwen2.5:3b      # local fallback model
    ```bash
    cd backend
    python -m venv .venv && .venv/Scripts/activate      # Linux/Mac: source .venv/bin/activate
-   pip install -r requirements.txt
+   pip install -r ../requirements.txt
    uvicorn app.main:app --reload --port 8000
    ```
 3. Frontend:
@@ -65,6 +65,32 @@ docker compose exec ollama ollama pull qwen2.5:3b      # local fallback model
    cd frontend && npm install && npm run dev
    ```
    Open http://localhost:5173 and log in with `APP_PASSWORD`.
+
+## Deploy on Vercel (live demo link)
+
+Vercel cannot run Docker, so FreeLLMAPI and Ollama are not available there. On Vercel, SIMON
+calls the free tiers of Groq / Gemini / OpenRouter directly; everything else works the same.
+`vercel.json` already configures the build (React app) and the API (`api/index.py`, Python).
+
+1. vercel.com → **Add New → Project** → import this GitHub repository → **Deploy**
+   (no build settings to change).
+2. Project → **Storage → Create Database → Neon (Postgres)** → connect it to the project.
+   This adds `DATABASE_URL` automatically.
+3. Project → **Settings → Environment Variables**:
+
+   | Name | Value |
+   |---|---|
+   | `APP_PASSWORD` | the login password for the web app |
+   | `JWT_SECRET` | a long random string |
+   | `GROQ_API_KEY` | from console.groq.com (free) |
+   | `GEMINI_API_KEY` | from aistudio.google.com (free) – optional second provider |
+   | `TIMEZONE`, `DEFAULT_CITY`, `LANGUAGE`, `TTS_VOICE` | optional |
+
+4. **Deployments → Redeploy**. Open `https://<project>.vercel.app/api/health` – it should show
+   `"database": "ok"` and the configured AI providers. Then open the main URL and log in.
+
+Every `git push` to `main` deploys automatically. On phones, open the link and use
+"Add to Home Screen" to install SIMON like an app.
 
 ## Deploy on the server
 

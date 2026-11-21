@@ -5,7 +5,7 @@ const Recognition = typeof window !== 'undefined' && (window.SpeechRecognition |
 /**
  * Listens once and resolves with the spoken text.
  * Uses the browser's built-in recognition (Chrome, Edge, Safari); otherwise records
- * audio and sends it to the server (FreeLLMAPI speech-to-text).
+ * audio and sends it to the server (FreeLLMAPI or Groq Whisper).
  */
 export function listen(lang, { onInterim } = {}) {
   if (Recognition) {
@@ -45,15 +45,32 @@ function recordAndTranscribe() {
     setTimeout(() => recorder.state === 'recording' && recorder.stop(), 15000)
     await stopped
     stream.getTracks().forEach((t) => t.stop())
-    return transcribe(new Blob(chunks, { type: recorder.mimeType }))
+    return transcribe(new Blob(chunks, { type: recorder.mimeType || 'audio/webm' }))
   })()
   return { promise, stop: () => recorder?.state === 'recording' && recorder.stop() }
 }
 
-let current = null
+/* ---------------------------------------------------------------- speaking
+ * Audio is played through one AudioContext that is unlocked on the first tap,
+ * because iOS and Android block audio that starts after an async fetch.
+ */
+let ctx = null
+let source = null
+let finishCurrent = null
+
+export function unlockAudio() {
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext
+    if (!AC) return
+    ctx = ctx || new AC()
+    if (ctx.state === 'suspended') ctx.resume()
+  } catch { /* audio not available */ }
+}
 
 export function stopSpeaking() {
-  if (current) { current.pause(); current = null }
+  try { source?.stop() } catch { /* already stopped */ }
+  source = null
+  finishCurrent?.()
   window.speechSynthesis?.cancel()
 }
 
@@ -72,14 +89,17 @@ export async function speak(text, lang) {
   const clean = plain(text)
   if (!clean) return
   try {
-    const url = URL.createObjectURL(await ttsAudio(clean))
-    const audio = new Audio(url)
-    current = audio
+    if (!ctx) throw new Error('no audio context')
+    const data = await (await ttsAudio(clean)).arrayBuffer()
+    const buffer = await ctx.decodeAudioData(data)
     await new Promise((resolve) => {
-      audio.onended = audio.onerror = audio.onpause = resolve
-      audio.play().catch(resolve)
+      source = ctx.createBufferSource()
+      source.buffer = buffer
+      source.connect(ctx.destination)
+      finishCurrent = () => { finishCurrent = null; resolve() }
+      source.onended = () => finishCurrent?.()
+      source.start()
     })
-    URL.revokeObjectURL(url)
   } catch {
     if (!window.speechSynthesis) return
     await new Promise((resolve) => {
