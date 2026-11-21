@@ -8,3 +8,5 @@ node_modules/
 frontend/dist/
 *.log
 .vercel/
+# documents for the client (sent via Fiverr, not part of the code)
+client/
