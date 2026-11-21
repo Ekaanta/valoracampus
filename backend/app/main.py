@@ -40,8 +40,16 @@ class LoginIn(BaseModel):
     password: str
 
 
+def _require_configured() -> None:
+    """Never run a public deployment with the built-in default password or token secret."""
+    if settings.app_password in ("", "change-me") or settings.jwt_secret in ("", "change-me-too"):
+        raise HTTPException(503, "Login is disabled until APP_PASSWORD and JWT_SECRET are set on the server "
+                                 "(Vercel: Settings → Environment Variables, then redeploy).")
+
+
 @app.post("/api/auth/login")
 def login(body: LoginIn):
+    _require_configured()
     if not hmac.compare_digest(body.password.encode(), settings.app_password.encode()):
         time.sleep(1)
         raise HTTPException(401, "Wrong password")
@@ -50,6 +58,7 @@ def login(body: LoginIn):
 
 
 def auth(authorization: str = Header(default="")) -> None:
+    _require_configured()
     try:
         jwt.decode(authorization.removeprefix("Bearer ").strip(), settings.jwt_secret, ["HS256"])
     except jwt.PyJWTError:

@@ -32,7 +32,10 @@ export async function api(path, { method = 'GET', body } = {}) {
 
 export async function login(password) {
   const res = await fetch('/api/auth/login', { method: 'POST', headers: headers(), body: JSON.stringify({ password }) })
-  if (!res.ok) throw new Error('Wrong password')
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}))
+    throw new Error(res.status === 401 ? 'Wrong password' : body.detail || 'Login failed')
+  }
   const { token } = await res.json()
   setToken(token)
 }
