@@ -97,10 +97,12 @@ def health():
         else:
             problems.append("The database cannot be reached. Check DATABASE_URL.")
     providers = [p["name"] for p in router.status()]
+    from .config import DATABASE_URL_SOURCE  # name of the variable only, never the value
     if not providers:
         problems.append("No AI provider configured. Add GROQ_API_KEY (and optionally GEMINI_API_KEY) "
                         "in Settings → Environment Variables and redeploy.")
-    return {"ok": not problems, "database": db, "ai_providers": providers, "problems": problems}
+    return {"ok": not problems, "database": db, "database_variable": DATABASE_URL_SOURCE,
+            "ai_providers": providers, "problems": problems}
 
 
 @app.get("/api/me", dependencies=[Depends(auth)])

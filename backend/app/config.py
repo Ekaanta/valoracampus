@@ -3,8 +3,29 @@
 Nothing secret is ever hard-coded: swapping the developer's test keys for the
 client's keys is a .env (or Vercel environment variable) change only.
 """
+import os
+
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _find_database_url() -> str | None:
+    """Vercel storage integrations may add a prefix (e.g. STORAGE_DATABASE_URL). Accept those too.
+
+    Returns the name of the variable that was used (never its value).
+    """
+    for name in ("DATABASE_URL", "POSTGRES_URL"):
+        if os.environ.get(name):
+            return name
+    for name, value in sorted(os.environ.items()):
+        upper = name.upper()
+        if value and upper.endswith(("_DATABASE_URL", "_POSTGRES_URL")) and "UNPOOLED" not in upper:
+            os.environ["DATABASE_URL"] = value
+            return name
+    return None
+
+
+DATABASE_URL_SOURCE = _find_database_url()
 
 
 class Settings(BaseSettings):
