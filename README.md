@@ -98,3 +98,8 @@ Add `sensitive=True, summarize=lambda a: "..."` if it spends money, publishes or
 does not support, add a `Provider(...)` entry in `LLMRouter.__init__` in `backend/app/llm.py`.
 
 **Change voice / language** – `LANGUAGE=de`, `TTS_VOICE=de-DE-ConradNeural` in `.env`.
+
+## AI providers
+
+See [docs/AI_PROVIDERS.md](docs/AI_PROVIDERS.md) for the evaluation of all 20 requested providers
+(free vs. trial vs. paid, limits, privacy, commercial use) and the real request test results.
