@@ -16,9 +16,9 @@ Anything a source did not confirm is marked *unverified*.
 
 **Answer to "how many providers can be genuinely configured and tested":** seven genuinely free
 sources (six cloud providers plus local Ollama), all reachable through FreeLLMAPI or directly.
-Three of them are already configured and verified with real requests (Groq, Google Gemini, OVHcloud),
-plus the keyless Kilo gateway and local Ollama. The other four need a free account created by you
-(OpenRouter, Cloudflare, Z.ai; Cohere optional for evaluation only).
+Four of them are already configured and verified with real requests (Groq, Google Gemini, OVHcloud
+and local Ollama), plus the keyless Kilo gateway. The other three need a free account created by you
+(OpenRouter, Cloudflare, Z.ai). Cohere and NVIDIA can be added for evaluation only.
 
 ## 1. FreeLLMAPI (priority 1) – installed and working
 
@@ -145,4 +145,4 @@ FreeLLMAPI dashboard yourself:
 - OVHcloud: docs.ovhcloud.com (AI Endpoints getting started & capabilities)
 - Together AI: together.ai/pricing, docs.together.ai/docs/billing-credits, /docs/changelog
 - Novita AI: novita.ai/models/llm, docs.novita.ai, novita.ai/legal/terms-of-service
-- SambaNova, ModelScope, OpenCode Zen: FreeLLMAPI provider documentation (re-verified upstream, Nov 2026)
+- SambaNova, ModelScope, OpenCode Zen: FreeLLMAPI provider documentation (state as of November 2026)
