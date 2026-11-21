@@ -90,6 +90,7 @@ function Shell({ canLogout }) {
   const [convId, setConvId] = useState(null)
   const [menu, setMenu] = useState(false)
   const [alerts, setAlerts] = useState([])
+  const [setup, setSetup] = useState([]) // server setup problems (missing database / AI key)
   const seen = useRef(new Set())
 
   const refreshConvs = useCallback(() => api('/conversations').then(setConvs).catch(() => {}), [])
@@ -97,6 +98,7 @@ function Shell({ canLogout }) {
   useEffect(() => {
     api('/me').then(setMe).catch(() => {})
     refreshConvs()
+    fetch('/api/health').then((r) => r.json()).then((h) => setSetup(h.problems || [])).catch(() => {})
   }, [refreshConvs])
 
   // Reminders: every open device polls; due reminders pop up and are spoken.
@@ -169,6 +171,14 @@ function Shell({ canLogout }) {
           <span className="only-mobile"><ThemeToggle /></span>
         </header>
         <div className="alerts" aria-live="polite">
+          {setup.length > 0 && (
+            <div className="alert setup" role="alert">
+              <span className="grow">
+                <b>Setup not finished.</b>
+                {setup.map((p) => <span key={p} className="setup-line">{p}</span>)}
+              </span>
+            </div>
+          )}
           {alerts.map((r) => (
             <div key={r.id} className="alert">
               <Icon name="bell" size={18} />

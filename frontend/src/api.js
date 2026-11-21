@@ -20,7 +20,8 @@ async function check(res) {
   }
   if (!res.ok) {
     const body = await res.json().catch(() => ({}))
-    throw new Error(body.detail || res.statusText)
+    // HTTP/2 hosts (Vercel) send no status text, so always fall back to a readable message.
+    throw new Error(body.detail || res.statusText || `The server had a problem (error ${res.status}). Please try again.`)
   }
   return res
 }

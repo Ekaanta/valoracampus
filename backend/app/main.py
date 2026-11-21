@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import os
 import time
 from datetime import timedelta
 from pathlib import Path
@@ -12,10 +13,11 @@ import edge_tts
 import jwt
 from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import delete, select
+from sqlalchemy.exc import OperationalError
 
 from . import tools
 from .agent import ensure_conversation, run_turn, save_message
@@ -27,6 +29,12 @@ from .llm import router
 app = FastAPI(title="SIMON")
 app.add_middleware(CORSMiddleware, allow_origins=[o.strip() for o in settings.cors_origins.split(",")],
                    allow_methods=["*"], allow_headers=["*"])
+
+@app.exception_handler(OperationalError)
+async def _database_down(request, exc):
+    return JSONResponse(status_code=503, content={
+        "detail": "The database is not reachable. Connect a Postgres database to the project and redeploy."})
+
 
 # Create tables on import: serverless platforms do not always run startup events.
 try:
@@ -75,13 +83,24 @@ def public_config():
 
 @app.get("/api/health")
 def health():
+    """Public setup check. Never returns secrets, only what is missing."""
+    problems = []
     try:
         with SessionLocal() as s:
             s.execute(select(1))
         db = "ok"
     except Exception as err:
         db = f"error: {type(err).__name__}"
-    return {"ok": db == "ok", "database": db, "ai_providers": [p["name"] for p in router.status()]}
+        if os.environ.get("VERCEL") and "@localhost" in settings.database_url:
+            problems.append("No database connected. In Vercel open Storage, create a Neon Postgres database, "
+                            "connect it to this project and redeploy.")
+        else:
+            problems.append("The database cannot be reached. Check DATABASE_URL.")
+    providers = [p["name"] for p in router.status()]
+    if not providers:
+        problems.append("No AI provider configured. Add GROQ_API_KEY (and optionally GEMINI_API_KEY) "
+                        "in Settings → Environment Variables and redeploy.")
+    return {"ok": not problems, "database": db, "ai_providers": providers, "problems": problems}
 
 
 @app.get("/api/me", dependencies=[Depends(auth)])

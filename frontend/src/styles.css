@@ -118,6 +118,9 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); }
 .alerts:not(:empty) { padding-top: 12px; }
 .alert { display: flex; align-items: center; gap: 10px; padding: 10px 12px 10px 14px; border-radius: 12px; background: var(--accent-soft); border: 1px solid var(--accent); color: var(--ink); max-width: 720px; width: 100%; margin: 0 auto; animation: drop .3s ease-out; }
 .alert .icon { color: var(--accent); }
+.alert.setup { background: color-mix(in srgb, var(--warn) 10%, transparent); border-color: color-mix(in srgb, var(--warn) 55%, var(--line)); align-items: flex-start; font-size: 14px; }
+.alert.setup b { display: block; margin-bottom: 2px; }
+.setup-line { display: block; color: var(--ink-2); }
 @keyframes drop { from { opacity: 0; transform: translateY(-6px); } }
 
 /* ============================================================ chat */
