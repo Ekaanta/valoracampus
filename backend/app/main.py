@@ -101,8 +101,12 @@ def health():
     if not providers:
         problems.append("No AI provider configured. Add GROQ_API_KEY (and optionally GEMINI_API_KEY) "
                         "in Settings → Environment Variables and redeploy.")
+    # Names (never values) of setup-related variables present on this deployment, to debug hosting setup.
+    hints = sorted(k for k in os.environ if any(w in k.upper() for w in
+                   ("DATABASE", "POSTGRES", "NEON", "PGHOST", "GROQ", "GEMINI", "OPENROUTER", "FREELLMAPI")))
     return {"ok": not problems, "database": db, "database_variable": DATABASE_URL_SOURCE,
-            "ai_providers": providers, "problems": problems}
+            "ai_providers": providers, "problems": problems,
+            "env_names_seen": hints, "vercel_env": os.environ.get("VERCEL_ENV")}
 
 
 @app.get("/api/me", dependencies=[Depends(auth)])
