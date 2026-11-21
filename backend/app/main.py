@@ -58,11 +58,19 @@ def login(body: LoginIn):
 
 
 def auth(authorization: str = Header(default="")) -> None:
+    if not settings.require_login:
+        return
     _require_configured()
     try:
         jwt.decode(authorization.removeprefix("Bearer ").strip(), settings.jwt_secret, ["HS256"])
     except jwt.PyJWTError:
         raise HTTPException(401, "Not logged in")
+
+
+@app.get("/api/config")
+def public_config():
+    """Tells the web app whether to show the login page."""
+    return {"require_login": settings.require_login}
 
 
 @app.get("/api/health")

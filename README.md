@@ -80,8 +80,9 @@ calls the free tiers of Groq / Gemini / OpenRouter directly; everything else wor
 
    | Name | Value |
    |---|---|
-   | `APP_PASSWORD` | the login password for the web app |
-   | `JWT_SECRET` | a long random string |
+   | `REQUIRE_LOGIN` | `true` to show the login page (default: off, anyone with the link can use SIMON) |
+   | `APP_PASSWORD` | the login password (needed when `REQUIRE_LOGIN=true`) |
+   | `JWT_SECRET` | a long random string (needed when `REQUIRE_LOGIN=true`) |
    | `GROQ_API_KEY` | from console.groq.com (free) |
    | `GEMINI_API_KEY` | from aistudio.google.com (free) – optional second provider |
    | `TIMEZONE`, `DEFAULT_CITY`, `LANGUAGE`, `TTS_VOICE` | optional |

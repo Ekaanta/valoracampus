@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=("../.env", ".env"), extra="ignore")
 
     # --- access -------------------------------------------------------------
+    # Login page on/off. Off = anyone with the link can use SIMON. Turn on with REQUIRE_LOGIN=true.
+    require_login: bool = False
     app_password: str = "change-me"
     jwt_secret: str = "change-me-too"
     cors_origins: str = "http://localhost:5173"

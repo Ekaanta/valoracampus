@@ -9,6 +9,10 @@ import Icon from './icons.jsx'
 
 export default function App() {
   const [authed, setAuthed] = useState(!!getToken())
+  const [needLogin, setNeedLogin] = useState(null) // asked from the server: login page on or off
+  useEffect(() => {
+    fetch('/api/config').then((r) => r.json()).then((c) => setNeedLogin(!!c.require_login)).catch(() => setNeedLogin(true))
+  }, [])
   useEffect(() => {
     const off = () => setAuthed(false)
     window.addEventListener('simon-logout', off)
@@ -18,7 +22,9 @@ export default function App() {
     window.addEventListener('keydown', unlock, { once: true })
     return () => window.removeEventListener('simon-logout', off)
   }, [])
-  return authed ? <Shell /> : <Login onDone={() => setAuthed(true)} />
+  if (needLogin === null) return null
+  if (!needLogin) return <Shell canLogout={false} />
+  return authed ? <Shell canLogout /> : <Login onDone={() => setAuthed(true)} />
 }
 
 function ThemeToggle() {
@@ -77,7 +83,7 @@ function relDate(iso) {
   return d.toLocaleDateString([], { day: 'numeric', month: 'short' })
 }
 
-function Shell() {
+function Shell({ canLogout }) {
   const [view, setView] = useState('chat')
   const [me, setMe] = useState({ assistant_name: 'SIMON', speech_lang: 'en-US' })
   const [convs, setConvs] = useState([])
@@ -148,7 +154,9 @@ function Shell() {
         </div>
         <div className="rail-foot">
           <ThemeToggle />
-          <button className="icon-btn" onClick={() => { setToken(null); location.reload() }} aria-label="Log out" title="Log out"><Icon name="logout" /></button>
+          {canLogout && (
+            <button className="icon-btn" onClick={() => { setToken(null); location.reload() }} aria-label="Log out" title="Log out"><Icon name="logout" /></button>
+          )}
         </div>
       </aside>
       {menu && <div className="scrim" onClick={() => setMenu(false)} />}
