@@ -4,8 +4,8 @@
   "description": "Personal AI assistant",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#141311",
-  "theme_color": "#141311",
+  "background_color": "#F3F0E8",
+  "theme_color": "#F3F0E8",
   "icons": [
     { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
   ]

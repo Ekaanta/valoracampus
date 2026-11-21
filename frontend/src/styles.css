@@ -21,14 +21,7 @@
   color-scheme: light;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --bg: #121210; --surface: #1A1A17; --surface-2: #24241F; --ink: #EDE9E0; --ink-2: #ABA699; --ink-3: #77736A;
-    --line: #2F2E29; --accent: #FF6A33; --accent-soft: rgba(255, 106, 51, .14); --on-accent: #160A05;
-    --ok: #5CBF86; --warn: #E3AA4C; --bad: #EC6F60; --shadow: 0 1px 0 rgba(0, 0, 0, .3), 0 10px 30px -14px rgba(0, 0, 0, .6);
-    color-scheme: dark;
-  }
-}
+/* Light is the default for everyone; dark only when the user picks it (saved per device). */
 :root[data-theme="dark"] {
   --bg: #121210; --surface: #1A1A17; --surface-2: #24241F; --ink: #EDE9E0; --ink-2: #ABA699; --ink-3: #77736A;
   --line: #2F2E29; --accent: #FF6A33; --accent-soft: rgba(255, 106, 51, .14); --on-accent: #160A05;
@@ -39,6 +32,7 @@
 /* ============================================================ base */
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; margin: 0; }
+html { background: var(--bg); }
 body {
   background: var(--bg); color: var(--ink); font: 15px/1.5 var(--sans);
   -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;

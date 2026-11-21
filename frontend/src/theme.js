@@ -3,12 +3,8 @@ import { useEffect, useState } from 'react'
 const KEY = 'simon_theme'
 const listeners = new Set()
 
-function systemTheme() {
-  return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
-}
-
 function current() {
-  return document.documentElement.dataset.theme || systemTheme()
+  return document.documentElement.dataset.theme || 'light' // light by default, dark only on request
 }
 
 function apply(theme) {
@@ -19,7 +15,7 @@ function apply(theme) {
   listeners.forEach((fn) => fn(theme))
 }
 
-/** Shared light/dark theme: [theme, toggle]. Follows the system until the user picks one. */
+/** Shared light/dark theme: [theme, toggle]. Starts light; the user's choice is remembered. */
 export function useTheme() {
   const [theme, setTheme] = useState(current)
   useEffect(() => {
