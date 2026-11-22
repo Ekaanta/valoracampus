@@ -4,8 +4,8 @@
   "description": "Personal AI assistant · Agent OS",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#E4EDF3",
-  "theme_color": "#E4EDF3",
+  "background_color": "#030A11",
+  "theme_color": "#030A11",
   "icons": [
     { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
   ]

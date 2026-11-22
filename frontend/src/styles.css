@@ -1,5 +1,5 @@
 /* ============================================================ tokens
-   "Agent OS" HUD. Light = daylight hologram (default), dark = night console. */
+   "Agent OS" HUD. Dark = night console (default), light = daylight hologram. */
 :root {
   --bg: #E4EDF3;
   --bg-2: #F5F9FC;
@@ -38,7 +38,7 @@
   color-scheme: light;
 }
 
-/* Light is the default for everyone; dark only when the user picks it (saved per device). */
+/* Dark is the default (set in index.html before first paint); light only when the user picks it. */
 :root[data-theme="dark"] {
   --bg: #030A11;
   --bg-2: #0A1D2D;

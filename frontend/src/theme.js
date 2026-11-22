@@ -4,7 +4,7 @@ const KEY = 'simon_theme'
 const listeners = new Set()
 
 function current() {
-  return document.documentElement.dataset.theme || 'light' // light by default, dark only on request
+  return document.documentElement.dataset.theme || 'dark' // dark by default, light only on request
 }
 
 function apply(theme) {
@@ -15,7 +15,7 @@ function apply(theme) {
   listeners.forEach((fn) => fn(theme))
 }
 
-/** Shared light/dark theme: [theme, toggle]. Starts light; the user's choice is remembered. */
+/** Shared light/dark theme: [theme, toggle]. Starts dark; the user's choice is remembered. */
 export function useTheme() {
   const [theme, setTheme] = useState(current)
   useEffect(() => {

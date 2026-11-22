@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
-    <meta name="theme-color" content="#E4EDF3" />
+    <meta name="theme-color" content="#030A11" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
@@ -16,8 +16,10 @@
     <link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600&family=Geist+Mono:wght@400;500&family=Orbitron:wght@500;600&display=swap" rel="stylesheet" />
     <title>S.I.M.O.N</title>
     <script>
-      // apply the saved theme before first paint (no light/dark flash)
-      try { var t = localStorage.getItem('simon_theme'); if (t) document.documentElement.dataset.theme = t } catch (e) {}
+      // apply the theme before first paint (no flash): the saved choice, otherwise dark
+      var t = 'dark'
+      try { t = localStorage.getItem('simon_theme') || 'dark' } catch (e) {}
+      document.documentElement.dataset.theme = t
     </script>
   </head>
   <body>
