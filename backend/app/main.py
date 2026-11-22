@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import OperationalError
 
 from . import tools
@@ -255,6 +255,45 @@ def activity(limit: int = 100):
 @app.get("/api/providers", dependencies=[Depends(auth)])
 def providers():
     return router.status()
+
+
+@app.get("/api/stats", dependencies=[Depends(auth)])
+def stats():
+    """Numbers for the dashboard (telemetry gauges and status pills), read from the database."""
+    with SessionLocal() as s:
+        def count(model, *where):
+            return s.scalar(select(func.count(model.id)).where(*where)) or 0
+
+        kinds = dict(s.execute(select(ActivityLog.kind, func.count(ActivityLog.id)).group_by(ActivityLog.kind)).all())
+        by_provider = dict(s.execute(
+            select(Message.provider, func.count(Message.id))
+            .where(Message.role == "assistant", Message.provider.is_not(None))
+            .group_by(Message.provider)).all())
+        last = s.scalars(select(Message).where(Message.role == "assistant", Message.provider.is_not(None))
+                         .order_by(Message.id.desc()).limit(1)).first()
+        out = {
+            "conversations": count(Conversation),
+            "questions": count(Message, Message.role == "user"),
+            "memories": count(Memory),
+            "reminders": count(Reminder, Reminder.status == "scheduled"),
+            "pending_actions": count(PendingAction, PendingAction.status == "pending"),
+            "last_provider": last.provider if last else None,
+            "last_model": last.model if last else None,
+        }
+    paid_names = {p["name"] for p in router.status() if p["paid"]}
+    answers = sum(by_provider.values())
+    errors = kinds.get("llm_error", 0)
+    out.update({
+        "answers": answers,
+        "paid_answers": sum(v for k, v in by_provider.items() if k in paid_names),
+        "by_provider": by_provider,
+        "tools_run": kinds.get("tool", 0),
+        "switches": kinds.get("llm_failover", 0),
+        "errors": errors,
+        "approvals": kinds.get("approval_requested", 0),
+        "reliability": round(100 * answers / (answers + errors)) if answers + errors else 100,
+    })
+    return out
 
 
 # ------------------------------------------------------------------ reminders

@@ -1,11 +1,11 @@
 {
   "name": "Simon",
   "short_name": "Simon",
-  "description": "Personal AI assistant",
+  "description": "Personal AI assistant · Agent OS",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#F3F0E8",
-  "theme_color": "#F3F0E8",
+  "background_color": "#E4EDF3",
+  "theme_color": "#E4EDF3",
   "icons": [
     { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
   ]

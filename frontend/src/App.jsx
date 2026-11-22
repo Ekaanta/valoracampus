@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, getToken, login, setToken, streamChat } from './api.js'
 import { listen, speak, stopSpeaking, unlockAudio } from './voice.js'
-import { ActivityPanel, MemoryPanel, ProvidersPanel } from './panels.jsx'
+import { ActivityPanel, HistoryPanel, MemoryPanel, SystemsPanel } from './panels.jsx'
+import { Brain, Feed, Panel, ProviderList, Sessions, Telemetry, pad } from './hud.jsx'
 import { useTheme } from './theme.js'
 import Chart from './Chart.jsx'
-import Dial from './Dial.jsx'
+import Reactor from './Reactor.jsx'
 import Icon from './icons.jsx'
 
 export default function App() {
@@ -37,6 +38,14 @@ function ThemeToggle() {
   )
 }
 
+function Wordmark({ big = false }) {
+  return (
+    <span className={big ? 'wordmark big' : 'wordmark'} aria-label="Simon">
+      S.I.M.O.N
+    </span>
+  )
+}
+
 /* ------------------------------------------------------------------ login */
 function Login({ onDone }) {
   const [pw, setPw] = useState('')
@@ -53,9 +62,9 @@ function Login({ onDone }) {
     <div className="login">
       <div className="login-theme"><ThemeToggle /></div>
       <div className="login-card">
-        <Dial state={busy ? 'thinking' : 'idle'} size={132} />
-        <h1 className="wordmark big">Simon</h1>
-        <p className="eyebrow">Personal assistant</p>
+        <div className="login-reactor"><Reactor state={busy ? 'thinking' : 'idle'} /></div>
+        <Wordmark big />
+        <p className="eyebrow">Authorization required</p>
         <form onSubmit={submit} className="login-form">
           <input type="password" placeholder="Password" value={pw} onChange={(e) => setPw(e.target.value)}
                  autoFocus autoComplete="current-password" aria-label="Password" />
@@ -68,38 +77,58 @@ function Login({ onDone }) {
 }
 
 /* ------------------------------------------------------------------ shell */
-const VIEWS = [
-  ['chat', 'Conversation', 'chat'],
+const TABS = [
+  ['core', 'Core', 'core'],
+  ['history', 'Sessions', 'history'],
   ['memory', 'Memory', 'memory'],
   ['activity', 'Activity', 'activity'],
-  ['providers', 'AI providers', 'cpu'],
+  ['systems', 'Systems', 'cpu'],
 ]
 
-function relDate(iso) {
-  const d = new Date(iso)
-  const days = Math.floor((Date.now() - d) / 86400000)
-  if (days < 1) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-  if (days < 7) return d.toLocaleDateString([], { weekday: 'short' })
-  return d.toLocaleDateString([], { day: 'numeric', month: 'short' })
+function Clock() {
+  const [now, setNow] = useState(() => new Date())
+  useEffect(() => {
+    const t = setInterval(() => setNow(new Date()), 1000)
+    return () => clearInterval(t)
+  }, [])
+  return (
+    <span className="clock" aria-label="Current time">
+      <span className="clock-time">{now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })}</span>
+      <span className="clock-date">{now.toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' })}</span>
+    </span>
+  )
 }
 
 function Shell({ canLogout }) {
-  const [view, setView] = useState('chat')
+  const [view, setView] = useState('core')
   const [me, setMe] = useState({ assistant_name: 'SIMON', speech_lang: 'en-US' })
   const [convs, setConvs] = useState([])
   const [convId, setConvId] = useState(null)
-  const [menu, setMenu] = useState(false)
   const [alerts, setAlerts] = useState([])
   const [setup, setSetup] = useState([]) // server setup problems (missing database / AI key)
+  const [stats, setStats] = useState(null)
+  const [providers, setProviders] = useState([])
+  const [memories, setMemories] = useState([])
+  const [activity, setActivity] = useState([])
+  const [orb, setOrb] = useState('idle') // shared with the status bar
   const seen = useRef(new Set())
 
   const refreshConvs = useCallback(() => api('/conversations').then(setConvs).catch(() => {}), [])
+  const refreshDeck = useCallback(() => {
+    api('/stats').then(setStats).catch(() => {})
+    api('/providers').then(setProviders).catch(() => {})
+    api('/memories').then(setMemories).catch(() => {})
+    api('/activity?limit=40').then(setActivity).catch(() => {})
+  }, [])
+  const refreshAll = useCallback(() => { refreshConvs(); refreshDeck() }, [refreshConvs, refreshDeck])
 
   useEffect(() => {
     api('/me').then(setMe).catch(() => {})
-    refreshConvs()
+    refreshAll()
     fetch('/api/health').then((r) => r.json()).then((h) => setSetup(h.problems || [])).catch(() => {})
-  }, [refreshConvs])
+    const t = setInterval(() => { if (!document.hidden) refreshDeck() }, 15000)
+    return () => clearInterval(t)
+  }, [refreshAll, refreshDeck])
 
   // Reminders: every open device polls; due reminders pop up and are spoken.
   useEffect(() => {
@@ -126,72 +155,94 @@ function Shell({ canLogout }) {
     api(`/reminders/${id}/done`, { method: 'POST' }).catch(() => {})
   }
 
-  const open = (id) => { setConvId(id); setView('chat'); setMenu(false) }
-  const go = (k) => { setView(k); setMenu(false) }
+  const open = (id) => { setConvId(id); setView('core') }
+  const back = () => setView('core')
+  const free = !stats?.paid_answers
 
   return (
-    <div className="shell">
-      <aside className={menu ? 'rail open' : 'rail'} aria-label="Navigation">
-        <div className="rail-head">
-          <span className="wordmark">Simon</span>
-          <button className="icon-btn only-mobile" onClick={() => setMenu(false)} aria-label="Close menu"><Icon name="x" /></button>
+    <div className={`os view-${view}`}>
+      <header className="topbar hud">
+        <Wordmark />
+        <span className="edition">Agent OS · personal edition</span>
+        <span className="grow" />
+        <div className="pills" aria-label="System status">
+          <span className={`pill ${free ? 'ok' : 'amber'}`}><i />{free ? 'Free mode · active' : `Paid calls · ${stats.paid_answers}`}</span>
+          <span className="pill">Brain · {stats?.last_provider || providers[0]?.name || '—'}</span>
+          <span className="pill wide-only">Answers · {stats?.answers ?? '—'}</span>
+          <span className="pill wide-only">Memories · {stats?.memories ?? '—'}</span>
+          <span className="pill wide-only">Tools · {stats?.tools_run ?? '—'}</span>
         </div>
-        <button className="btn-new" onClick={() => open(null)}><Icon name="plus" size={18} /> New conversation</button>
-        <nav className="nav">
-          {VIEWS.map(([k, label, icon]) => (
-            <button key={k} className={view === k ? 'active' : ''} onClick={() => go(k)} aria-current={view === k ? 'page' : undefined}>
-              <Icon name={icon} size={18} /> {label}
-            </button>
-          ))}
-        </nav>
-        <div className="eyebrow rail-label">Recent</div>
-        <div className="convs">
-          {convs.map((c) => (
-            <button key={c.id} className={c.id === convId && view === 'chat' ? 'conv active' : 'conv'} onClick={() => open(c.id)}>
-              <span className="conv-title">{c.title}</span>
-              <span className="conv-date">{relDate(c.updated_at)}</span>
-            </button>
-          ))}
-          {!convs.length && <p className="rail-empty">Your conversations will appear here.</p>}
-        </div>
-        <div className="rail-foot">
-          <ThemeToggle />
-          {canLogout && (
-            <button className="icon-btn" onClick={() => { setToken(null); location.reload() }} aria-label="Log out" title="Log out"><Icon name="logout" /></button>
-          )}
-        </div>
-      </aside>
-      {menu && <div className="scrim" onClick={() => setMenu(false)} />}
+        <Clock />
+        <ThemeToggle />
+        {canLogout && (
+          <button className="icon-btn" onClick={() => { setToken(null); location.reload() }} aria-label="Log out" title="Log out"><Icon name="logout" /></button>
+        )}
+      </header>
 
-      <main className="main">
-        <header className="topbar">
-          <button className="icon-btn only-mobile" onClick={() => setMenu(true)} aria-label="Open menu"><Icon name="menu" /></button>
-          <span className="topbar-title">{VIEWS.find(([k]) => k === view)[1]}</span>
-          <span className="grow" />
-          <span className="only-mobile"><ThemeToggle /></span>
-        </header>
-        <div className="alerts" aria-live="polite">
-          {setup.length > 0 && (
-            <div className="alert setup" role="alert">
-              <span className="grow">
-                <b>Setup not finished.</b>
-                {setup.map((p) => <span key={p} className="setup-line">{p}</span>)}
-              </span>
-            </div>
+      <div className="deck">
+        <aside className="wing wing-left" aria-label="Neural core">
+          <Panel title="Neural core" meta={`${providers.length} ${providers.length === 1 ? 'model' : 'models'}`}
+                 onOpen={() => setView('systems')} className="grow-panel">
+            <div className="hud-scroll"><ProviderList providers={providers} stats={stats} /></div>
+          </Panel>
+          <Panel title="Telemetry" meta={orb === 'idle' ? 'standby' : orb}>
+            <Telemetry stats={stats} />
+          </Panel>
+        </aside>
+
+        <main className="stage hud">
+          <div className="alerts" aria-live="polite">
+            {setup.length > 0 && (
+              <div className="alert setup" role="alert">
+                <Icon name="warn" size={18} />
+                <span className="grow">
+                  <b>Setup not finished.</b>
+                  {setup.map((p) => <span key={p} className="setup-line">{p}</span>)}
+                </span>
+              </div>
+            )}
+            {alerts.map((r) => (
+              <div key={r.id} className="alert">
+                <Icon name="bell" size={18} />
+                <span className="grow">{r.text}</span>
+                <button className="btn small" onClick={() => dismiss(r.id)}>Done</button>
+              </div>
+            ))}
+          </div>
+          {view === 'core' && (
+            <ChatView me={me} convId={convId} setConvId={setConvId} onChanged={refreshAll}
+                      orb={orb} setOrb={setOrb} stats={stats} onNew={() => open(null)} />
           )}
-          {alerts.map((r) => (
-            <div key={r.id} className="alert">
-              <Icon name="bell" size={18} />
-              <span className="grow">{r.text}</span>
-              <button className="btn small" onClick={() => dismiss(r.id)}>Done</button>
-            </div>
-          ))}
-        </div>
-        {view === 'chat' && <ChatView me={me} convId={convId} setConvId={setConvId} onChanged={refreshConvs} />}
-        {view === 'memory' && <MemoryPanel />}
-        {view === 'activity' && <ActivityPanel />}
-        {view === 'providers' && <ProvidersPanel />}
-      </main>
+          {view === 'memory' && <MemoryPanel onBack={back} onChanged={refreshDeck} />}
+          {view === 'activity' && <ActivityPanel onBack={back} />}
+          {view === 'systems' && <SystemsPanel onBack={back} providers={providers} stats={stats} />}
+          {view === 'history' && (
+            <HistoryPanel onBack={back} convs={convs} convId={convId} onOpen={open} onNew={() => open(null)}
+                          onChanged={(id) => { if (id === convId) setConvId(null); refreshAll() }} />
+          )}
+        </main>
+
+        <aside className="wing wing-right" aria-label="Memory and activity">
+          <Panel title="Second brain" meta={`${memories.length} ${memories.length === 1 ? 'note' : 'notes'}`} onOpen={() => setView('memory')}>
+            <Brain memories={memories} onPick={() => setView('memory')} />
+          </Panel>
+          <Panel title="Sessions" meta={convs.length} onOpen={() => setView('history')} className="grow-panel">
+            <button className="btn-new" onClick={() => open(null)}><Icon name="plus" size={16} /> New session</button>
+            <div className="hud-scroll"><Sessions convs={convs} convId={view === 'core' ? convId : null} onOpen={open} /></div>
+          </Panel>
+          <Panel title="Live feed" onOpen={() => setView('activity')} className="grow-panel">
+            <div className="hud-scroll"><Feed items={activity} /></div>
+          </Panel>
+        </aside>
+      </div>
+
+      <nav className="tabbar" aria-label="Sections">
+        {TABS.map(([k, label, icon]) => (
+          <button key={k} className={view === k ? 'active' : ''} onClick={() => setView(k)} aria-current={view === k ? 'page' : undefined}>
+            <Icon name={icon} size={20} /><span>{label}</span>
+          </button>
+        ))}
+      </nav>
     </div>
   )
 }
@@ -206,11 +257,13 @@ const TOOL_LABELS = {
 }
 
 const SUGGESTIONS = [
-  'What will the weather be like tomorrow?',
-  'How is Bitcoin doing this week?',
-  'Remind me to call the bank in one hour',
-  'What do you remember about me?',
+  ['Weather', 'What will the weather be like tomorrow?'],
+  ['Markets', 'How is Bitcoin doing this week?'],
+  ['Reminder', 'Remind me to call the bank in one hour'],
+  ['Memory', 'What do you remember about me?'],
 ]
+
+const STATE_LABELS = { idle: 'Standby', listening: 'Listening', thinking: 'Processing', speaking: 'Speaking' }
 
 function greeting() {
   const h = new Date().getHours()
@@ -219,11 +272,10 @@ function greeting() {
 
 const timeOf = (m) => new Date(m.created_at || m.at || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 
-function ChatView({ me, convId, setConvId, onChanged }) {
+function ChatView({ me, convId, setConvId, onChanged, orb, setOrb, stats, onNew }) {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
-  const [orb, setOrb] = useState('idle')
   const [interim, setInterim] = useState('')
   const [handsFree, setHandsFree] = useState(false)
   const skipLoad = useRef(false)
@@ -247,8 +299,10 @@ function ChatView({ me, convId, setConvId, onChanged }) {
     const el = textarea.current
     if (!el) return
     el.style.height = 'auto'
-    el.style.height = `${Math.min(el.scrollHeight, 168)}px`
+    el.style.height = `${Math.min(el.scrollHeight, 150)}px`
   }, [input])
+
+  useEffect(() => () => { listener.current?.stop(); stopSpeaking(); setOrb('idle') }, [setOrb])
 
   const patchLast = (fn) => setMessages((ms) => {
     const copy = [...ms]
@@ -325,6 +379,14 @@ function ChatView({ me, convId, setConvId, onChanged }) {
     if (!busy) startListening()
   }
 
+  const speakAgain = async (text) => {
+    if (busy) return
+    unlockAudio()
+    setOrb('speaking')
+    await speak(text, me.speech_lang)
+    setOrb('idle')
+  }
+
   const decide = async (msgIndex, actionId, verdict) => {
     try {
       const res = await api(`/actions/${actionId}/${verdict}`, { method: 'POST' })
@@ -348,39 +410,74 @@ function ChatView({ me, convId, setConvId, onChanged }) {
   }
 
   const empty = messages.length === 0
-  const stateLabel = { idle: 'Tap to talk', listening: 'Listening', thinking: 'Thinking', speaking: 'Speaking — tap to stop' }[orb]
+  const hint = { idle: 'Tap the core to talk', listening: 'Listening — tap to stop', thinking: 'Working on it', speaking: 'Speaking — tap to stop' }[orb]
+  const lastAi = [...messages].reverse().find((m) => m.role === 'assistant')
+  const caption = interim || (orb === 'thinking' ? (lastAi?.status || 'Thinking') : null)
+  const brain = lastAi?.provider || stats?.last_provider
 
   return (
-    <div className="chat">
+    <div className={empty ? 'core welcome' : 'core live'}>
+      <div className="core-body">
+      <section className="reactor-stage" aria-label="Simon">
+        <div className="reactor-frame">
+          <div className="stat-box tl"><span>Questions</span><b>{pad(stats?.questions ?? 0, 3)}</b></div>
+          <div className="stat-box tr"><span>Brain</span><b className="small">{brain || 'auto'}</b></div>
+          <div className="stat-box bl"><span>Tools run</span><b>{pad(stats?.tools_run ?? 0, 3)}</b></div>
+          <div className="stat-box br"><span>Memories</span><b>{pad(stats?.memories ?? 0, 3)}</b></div>
+          <button className="reactor-btn" onClick={micClick} aria-label={hint} title={hint}>
+            <Reactor state={orb} />
+          </button>
+        </div>
+        <div className="stage-text">
+          <div className="pill-row">
+            <span className={`state-pill ${orb}`}><i />Simon · {STATE_LABELS[orb]}</span>
+            {!empty && (
+              <button className="new-session" onClick={onNew} title="Start a new session"><Icon name="plus" size={13} /> New</button>
+            )}
+          </div>
+          {empty ? (
+            <>
+              <h1 className="welcome-title">{greeting()}. <span>All systems online.</span></h1>
+              <p className="welcome-sub">{hint}, or type below. Simon remembers what matters and asks before anything that costs money.</p>
+            </>
+          ) : (
+            <p className="caption" aria-live="polite">{caption || hint}</p>
+          )}
+        </div>
+      </section>
+
       <div className="scroll">
         {empty ? (
-          <section className="welcome">
-            <button className="welcome-dial" onClick={micClick} aria-label={stateLabel}>
-              <Dial state={orb} size={176} />
-            </button>
-            <p className="eyebrow">{stateLabel}</p>
-            <h2 className="welcome-title">{greeting()}.</h2>
-            <p className="welcome-sub">Ask, tell or plan anything. Simon remembers what matters and asks before doing anything that costs money.</p>
-            <div className="suggestions">
-              {SUGGESTIONS.map((s) => <button key={s} onClick={() => send(s)}>{s}</button>)}
-            </div>
-          </section>
+          <div className="suggestions">
+            {SUGGESTIONS.map(([tag, s]) => (
+              <button key={s} onClick={() => send(s)}><span className="sugg-tag">{tag}</span>{s}</button>
+            ))}
+          </div>
         ) : (
           <div className="thread">
             {messages.map((m, i) => m.role === 'user' ? (
-              <div key={m.id || i} className="msg-user"><p>{m.content}</p></div>
+              <div key={m.id || i} className="msg-user">
+                <span className="msg-label">You · {timeOf(m)}</span>
+                <p>{m.content}</p>
+              </div>
             ) : (
               <article key={m.id || i} className="msg-ai">
                 <header className="meta">
                   <span className="meta-name">Simon</span><span>{timeOf(m)}</span>
                   {m.provider && <span>via {m.provider}</span>}
+                  <span className="grow" />
+                  {m.content && !(busy && i === messages.length - 1) && (
+                    <button className="replay" onClick={() => speakAgain(m.content)} aria-label="Read this answer aloud" title="Read aloud">
+                      <Icon name="speaker" size={15} />
+                    </button>
+                  )}
                 </header>
                 {m.tools?.length > 0 && (
                   <ul className="toollog">
                     {m.tools.map((t) => (
                       <li key={t.name} className={t.status}>
                         <span className="tick" />{TOOL_LABELS[t.name] || t.name}
-                        <span className="toolstate">{t.status === 'running' ? '…' : t.status === 'error' ? 'failed' : 'done'}</span>
+                        <span className="toolstate">{t.status === 'running' ? 'running' : t.status === 'error' ? 'failed' : 'done'}</span>
                       </li>
                     ))}
                   </ul>
@@ -391,10 +488,9 @@ function ChatView({ me, convId, setConvId, onChanged }) {
                 {m.cards?.map((c, k) => c.type === 'approval' && <Card key={k} card={c} onDecide={(id, v) => decide(i, id, v)} />)}
                 {m.paid && (
                   <div className="ticket warn">
-                    <div className="ticket-head"><span>Paid model needed</span><span>approval</span></div>
+                    <div className="ticket-head"><span>Paid model needed</span><span>Approval</span></div>
                     <p className="ticket-body">All free AI providers are busy. Use <b>{m.paid.provider}</b> ({m.paid.model}) for this answer?</p>
                     <p className="ticket-note">Estimated cost: {m.paid.cost_note}</p>
-                    <div className="perf" />
                     <div className="ticket-actions">
                       <button className="btn primary" onClick={() => send(null, { allowPaid: true })}>Use paid model once</button>
                       <button className="btn ghost" onClick={() => patchLast((x) => ({ ...x, paid: null }))}>Not now</button>
@@ -407,19 +503,20 @@ function ChatView({ me, convId, setConvId, onChanged }) {
                 )}
               </article>
             ))}
-            {interim && <div className="msg-user interim"><p>{interim}</p></div>}
+            {interim && <div className="msg-user interim"><span className="msg-label">You · live</span><p>{interim}</p></div>}
             <div ref={bottom} className="thread-end" />
           </div>
         )}
       </div>
+      </div>
 
       <form className="composer" onSubmit={submit}>
         <div className={`composer-box ${orb}`}>
-          <button type="button" className="mic" onClick={micClick} aria-label={stateLabel} title={stateLabel}>
-            <Dial state={orb} size={46}><Icon name={orb === 'listening' ? 'stop' : orb === 'speaking' ? 'speaker' : 'mic'} size={18} /></Dial>
+          <button type="button" className={`mic ${orb}`} onClick={micClick} aria-label={hint} title={hint}>
+            <Icon name={orb === 'listening' ? 'stop' : orb === 'speaking' ? 'speaker' : 'mic'} size={18} />
           </button>
           <textarea ref={textarea} rows={1} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={onKey}
-                    placeholder={orb === 'listening' ? 'Listening…' : 'Ask Simon anything…'} aria-label="Message" />
+                    placeholder={orb === 'listening' ? 'Listening…' : 'Message Simon…'} aria-label="Message" />
           <button className="send" disabled={busy || !input.trim()} aria-label="Send"><Icon name="arrowUp" size={18} /></button>
         </div>
         <div className="composer-meta">
@@ -452,9 +549,8 @@ function Card({ card, onDecide }) {
     const a = card.action
     return (
       <div className={`ticket ${a.status}`}>
-        <div className="ticket-head"><span>Confirmation required</span><span>No. {String(a.id).padStart(4, '0')}</span></div>
+        <div className="ticket-head"><span>Authorization required</span><span>No. {String(a.id).padStart(4, '0')}</span></div>
         <p className="ticket-body">{a.summary}</p>
-        <div className="perf" />
         {a.status === 'pending' ? (
           <div className="ticket-actions">
             <button className="btn primary" onClick={() => onDecide(a.id, 'approve')}><Icon name="check" size={18} /> Confirm</button>

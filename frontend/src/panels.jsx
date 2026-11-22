@@ -1,50 +1,62 @@
+// Full-size views: opened from the tab bar (phone, tablet) or from a wing panel's expand button (desktop).
 import { useEffect, useState } from 'react'
 import { api } from './api.js'
+import { Brain, CATS, Feed, KIND_LABELS, Panel, ProviderList, Sessions, Telemetry } from './hud.jsx'
 import Icon from './icons.jsx'
 
-const CATS = ['profile', 'preference', 'project', 'decision', 'task', 'other']
-
-function PanelHead({ title, children }) {
+function ViewHead({ title, code, children, onBack }) {
   return (
-    <header className="panel-head">
-      <h2 className="panel-title">{title}</h2>
-      <p className="panel-sub">{children}</p>
+    <header className="view-head">
+      {onBack && (
+        <button className="back" onClick={onBack}><Icon name="back" size={16} /> Core</button>
+      )}
+      <p className="eyebrow">{code}</p>
+      <h2 className="view-title">{title}</h2>
+      {children && <p className="view-sub">{children}</p>}
     </header>
   )
 }
 
-export function MemoryPanel() {
+export function MemoryPanel({ onBack, onChanged }) {
   const [items, setItems] = useState([])
+  const [all, setAll] = useState([])
   const [q, setQ] = useState('')
   const [draft, setDraft] = useState({ content: '', category: 'profile' })
   const [editing, setEditing] = useState(null)
 
-  const load = () => api(`/memories?q=${encodeURIComponent(q)}`).then(setItems).catch(() => {})
+  const load = () => api(`/memories?q=${encodeURIComponent(q)}`).then((rows) => {
+    setItems(rows)
+    if (!q) setAll(rows) // the graph always shows everything
+  }).catch(() => {})
   useEffect(() => { load() }, [q]) // eslint-disable-line react-hooks/exhaustive-deps
+  const changed = () => { load(); onChanged?.() }
 
   const add = async (e) => {
     e.preventDefault()
     if (!draft.content.trim()) return
     await api('/memories', { method: 'POST', body: draft })
     setDraft({ ...draft, content: '' })
-    load()
+    changed()
   }
   const save = async () => {
     await api(`/memories/${editing.id}`, { method: 'PUT', body: { content: editing.content, category: editing.category } })
     setEditing(null)
-    load()
+    changed()
   }
   const remove = async (id) => {
     if (!confirm('Delete this memory permanently?')) return
     await api(`/memories/${id}`, { method: 'DELETE' })
-    load()
+    changed()
   }
 
   return (
-    <div className="panel">
-      <PanelHead title="Memory">
+    <div className="view">
+      <ViewHead title="Memory bank" code="02 · Second brain" onBack={onBack}>
         What Simon knows about you, learned from your conversations. Correct or delete anything at any time.
-      </PanelHead>
+      </ViewHead>
+      <Panel title="Knowledge graph" meta={`${all.length} ${all.length === 1 ? 'memory' : 'memories'}`} className="brain-panel">
+        <Brain memories={all} onPick={(m) => setEditing(m)} />
+      </Panel>
       <div className="field-search">
         <Icon name="search" size={18} />
         <input placeholder="Search memory" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search memory" />
@@ -55,9 +67,8 @@ export function MemoryPanel() {
         <select value={draft.category} onChange={(e) => setDraft({ ...draft, category: e.target.value })} aria-label="Category">
           {CATS.map((c) => <option key={c}>{c}</option>)}
         </select>
-        <button className="btn primary" disabled={!draft.content.trim()}>Add</button>
+        <button className="btn primary" disabled={!draft.content.trim()}>Store</button>
       </form>
-      <p className="count">{items.length} {items.length === 1 ? 'memory' : 'memories'}</p>
       <ul className="rows">
         {items.map((m) => (
           <li key={m.id} className="row">
@@ -72,7 +83,7 @@ export function MemoryPanel() {
               </div>
             ) : (
               <>
-                <span className="tag">{m.category}</span>
+                <span className={`tag cat-${m.category}`}>{m.category}</span>
                 <span className="row-text">{m.content}</span>
                 <span className="row-meta">{m.source === 'auto' ? 'learned' : 'added'}</span>
                 <span className="row-actions">
@@ -89,12 +100,7 @@ export function MemoryPanel() {
   )
 }
 
-const KIND_LABELS = {
-  tool: 'tool', memory: 'memory', llm_failover: 'switch', llm_error: 'error', approval_requested: 'approval',
-  approval_executed: 'confirmed', approval_rejected: 'rejected', paid_approval_needed: 'paid?', memory_error: 'error',
-}
-
-export function ActivityPanel() {
+export function ActivityPanel({ onBack }) {
   const [items, setItems] = useState([])
   useEffect(() => {
     const load = () => api('/activity?limit=200').then(setItems).catch(() => {})
@@ -103,8 +109,10 @@ export function ActivityPanel() {
     return () => clearInterval(t)
   }, [])
   return (
-    <div className="panel">
-      <PanelHead title="Activity">Every step Simon took: tools used, provider switches, approvals and memories learned.</PanelHead>
+    <div className="view">
+      <ViewHead title="Activity log" code="03 · Every step" onBack={onBack}>
+        Every step Simon took: tools used, provider switches, approvals and memories learned.
+      </ViewHead>
       <ol className="timeline">
         {items.map((a) => (
           <li key={a.id} className={`k-${a.kind}`}>
@@ -119,40 +127,41 @@ export function ActivityPanel() {
   )
 }
 
-export function ProvidersPanel() {
-  const [items, setItems] = useState([])
-  useEffect(() => {
-    const load = () => api('/providers').then(setItems).catch(() => {})
-    load()
-    const t = setInterval(load, 10000)
-    return () => clearInterval(t)
-  }, [])
+export function SystemsPanel({ onBack, providers, stats }) {
   return (
-    <div className="panel">
-      <PanelHead title="AI providers">
-        Free first. Simon tries these in order and moves to the next one when a provider is busy or out of quota.
-        A paid model is only used after you approve it.
-      </PanelHead>
-      <ol className="providers">
-        {items.map((p, i) => {
-          const state = p.cooling_down ? 'busy' : p.last_ok_at ? 'online' : 'standby'
-          return (
-            <li key={p.name} className="provider">
-              <span className="provider-rank">{String(i + 1).padStart(2, '0')}</span>
-              <div className="grow">
-                <div className="provider-name">{p.name} <span className={`tag ${p.paid ? 'warn' : 'ok'}`}>{p.paid ? 'paid · asks first' : 'free'}</span></div>
-                <div className="provider-model">{p.model}</div>
-                {p.last_error && p.cooling_down && <div className="provider-err">{p.last_error}</div>}
-              </div>
-              <div className="provider-stats">
-                <span className={`status ${state}`}><span className="dot" />{state}</span>
-                <span className="mono-small">{p.ok_count} ok · {p.fail_count} failed</span>
-              </div>
-            </li>
-          )
-        })}
-        {!items.length && <li className="empty">No AI provider is configured.</li>}
-      </ol>
+    <div className="view">
+      <ViewHead title="Systems" code="04 · Neural core" onBack={onBack}>
+        Free first. Simon tries these providers in order and moves to the next one when a provider is busy or out of
+        quota. A paid model is only used after you approve it.
+      </ViewHead>
+      <Panel title="Telemetry"><Telemetry stats={stats} /></Panel>
+      <Panel title="Neural core" meta={`${providers.length} ${providers.length === 1 ? 'model' : 'models'}`}>
+        <ProviderList providers={providers} stats={stats} detailed />
+      </Panel>
+      <Panel title="Live feed"><ActivityMini /></Panel>
+    </div>
+  )
+}
+
+function ActivityMini() {
+  const [items, setItems] = useState([])
+  useEffect(() => { api('/activity?limit=12').then(setItems).catch(() => {}) }, [])
+  return <Feed items={items} limit={12} />
+}
+
+export function HistoryPanel({ onBack, convs, convId, onOpen, onNew, onChanged }) {
+  const remove = async (c) => {
+    if (!confirm(`Delete “${c.title}” permanently?`)) return
+    await api(`/conversations/${c.id}`, { method: 'DELETE' })
+    onChanged?.(c.id)
+  }
+  return (
+    <div className="view">
+      <ViewHead title="Sessions" code="01 · History" onBack={onBack}>
+        Every conversation is saved and searchable by Simon. Open one to continue where you left off.
+      </ViewHead>
+      <button className="btn primary wide" onClick={onNew}><Icon name="plus" size={18} /> New session</button>
+      <Sessions convs={convs} convId={convId} onOpen={onOpen} onDelete={remove} />
     </div>
   )
 }

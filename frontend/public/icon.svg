@@ -1,8 +1,20 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <rect width="512" height="512" rx="116" fill="#141311"/>
-  <g stroke="#EDE9E0" stroke-width="10" stroke-linecap="round">
-    <path d="M256 92v34M256 386v34M92 256h34M386 256h34M140 140l24 24M348 348l24 24M140 372l24-24M348 164l24-24" opacity=".55"/>
-    <path d="M198 106l9 31M305 406l9-31M106 314l31-9M406 198l-31 9M106 198l31 9M406 314l-31-9M198 406l9-31M314 106l-9 31" opacity=".3"/>
-  </g>
-  <circle cx="256" cy="256" r="58" fill="#FF6A33"/>
+  <defs>
+    <radialGradient id="core" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#F2FEFF"/>
+      <stop offset=".45" stop-color="#9FF0FF"/>
+      <stop offset=".75" stop-color="#1FCFF0"/>
+      <stop offset="1" stop-color="#1FCFF0" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="halo" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#1FCFF0" stop-opacity=".45"/>
+      <stop offset="1" stop-color="#1FCFF0" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="512" height="512" rx="116" fill="#04101B"/>
+  <circle cx="256" cy="256" r="210" fill="url(#halo)"/>
+  <circle cx="256" cy="256" r="196" fill="none" stroke="#3FD8FF" stroke-opacity=".35" stroke-width="4"/>
+  <circle cx="256" cy="256" r="160" fill="none" stroke="#3FD8FF" stroke-width="26" stroke-dasharray="72 28.5" transform="rotate(-12 256 256)"/>
+  <circle cx="256" cy="256" r="118" fill="none" stroke="#3FD8FF" stroke-opacity=".75" stroke-width="10" stroke-dasharray="16 14.9"/>
+  <circle cx="256" cy="256" r="92" fill="url(#core)"/>
 </svg>
