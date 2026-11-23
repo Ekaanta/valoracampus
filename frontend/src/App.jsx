@@ -301,7 +301,8 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew }) {
     return copy
   })
 
-  const send = async (text, { allowPaid = false } = {}) => {
+  // spoken: the question came from the microphone, so the answer is spoken too (even without hands-free)
+  const send = async (text, { allowPaid = false, spoken = false } = {}) => {
     if (busy) return
     unlockAudio()
     setBusy(true)
@@ -317,7 +318,7 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew }) {
       finished = true
       setBusy(false)
       onChanged()
-      if (handsFreeRef.current && reply.trim()) {
+      if ((spoken || handsFreeRef.current) && reply.trim()) {
         setOrb('speaking')
         await speak(reply, speechLang())
         if (handsFreeRef.current) return startListening()
@@ -355,7 +356,7 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew }) {
       const text = await listener.current.promise
       setInterim('')
       listener.current = null
-      if (text) return send(text)
+      if (text) return send(text, { spoken: true })
     } catch (x) {
       listener.current = null
       setInterim('')
