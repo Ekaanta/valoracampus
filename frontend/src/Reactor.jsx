@@ -2,6 +2,23 @@ import { useEffect, useRef } from 'react'
 import { voiceLevel } from './voice.js'
 
 const TAU = Math.PI * 2
+const GOLDEN = 2.39996
+
+function readColors(el) {
+  const cs = getComputedStyle(el)
+  const v = (name, fallback) => cs.getPropertyValue(name).trim() || fallback
+  const blend = v('--reactor-blend', 'lighter')
+  return {
+    line: v('--hud', '#3fd8ff'),
+    hi: v('--hud-hi', '#c8f6ff'),
+    amber: v('--amber', '#ffb547'),
+    ok: v('--ok', '#45e2a0'),
+    core: v('--core', '#22d3ee'),
+    coreHi: v('--core-hi', '#f0feff'),
+    glow: parseFloat(v('--glow', '1')) || 0,
+    dark: blend === 'lighter',
+  }
+}
 
 /** Same colour with zero alpha, so gradients fade out without passing through grey. */
 function clear(color) {
@@ -11,26 +28,69 @@ function clear(color) {
   return `rgba(${n >> 16},${(n >> 8) & 255},${n & 255},0)`
 }
 
-function readColors(el) {
-  const cs = getComputedStyle(el)
-  const v = (name, fallback) => cs.getPropertyValue(name).trim() || fallback
-  return {
-    line: v('--hud', '#3fd8ff'),
-    hi: v('--hud-hi', '#c8f6ff'),
-    amber: v('--amber', '#ffb547'),
-    core: v('--core', '#22d3ee'),
-    coreHi: v('--core-hi', '#f0feff'),
-    glow: parseFloat(v('--glow', '1')) || 0,
-    blend: v('--reactor-blend', 'lighter'),
-  }
+/** Small deterministic random generator: the sphere looks the same on every visit. */
+function random(seed) {
+  let s = seed
+  return () => (s = (s * 16807) % 2147483647) / 2147483647
 }
 
+/** Points on (and slightly inside) a sphere, plus a sparse web linking near neighbours. */
+function buildSphere(n) {
+  const rnd = random(11)
+  const pts = new Float32Array(n * 3)
+  const phase = new Float32Array(n)
+  for (let i = 0; i < n; i++) {
+    const y = 1 - ((i + 0.5) / n) * 2
+    const rad = Math.sqrt(1 - y * y)
+    const th = i * GOLDEN + (rnd() - 0.5) * 0.3
+    const depth = rnd() < 0.82 ? 0.9 + rnd() * 0.1 : 0.35 + rnd() * 0.5 // most on the shell, some inside
+    pts[i * 3] = Math.cos(th) * rad * depth
+    pts[i * 3 + 1] = y * depth
+    pts[i * 3 + 2] = Math.sin(th) * rad * depth
+    phase[i] = rnd() * TAU
+  }
+  const pairs = new Set()
+  for (let i = 0; i < n; i++) {
+    let b1 = -1, b2 = -1, d1 = 9, d2 = 9
+    for (let j = 0; j < n; j++) {
+      if (j === i) continue
+      const dx = pts[i * 3] - pts[j * 3], dy = pts[i * 3 + 1] - pts[j * 3 + 1], dz = pts[i * 3 + 2] - pts[j * 3 + 2]
+      const d = dx * dx + dy * dy + dz * dz
+      if (d < d1) { d2 = d1; b2 = b1; d1 = d; b1 = j } else if (d < d2) { d2 = d; b2 = j }
+    }
+    for (const j of [b1, b2]) if (j >= 0) pairs.add(i < j ? i * 65536 + j : j * 65536 + i)
+  }
+  const edges = new Uint16Array(pairs.size * 2)
+  let k = 0
+  for (const p of pairs) { edges[k++] = Math.floor(p / 65536); edges[k++] = p % 65536 }
+  return { pts, phase, edges }
+}
+
+function buildShards(count) {
+  const rnd = random(5)
+  return Array.from({ length: count }, () => ({
+    r: 1.38 + rnd() * 0.42,
+    tilt: (rnd() - 0.5) * 1.4,
+    roll: (rnd() - 0.5) * 0.8,
+    speed: (0.08 + rnd() * 0.12) * (rnd() < 0.5 ? -1 : 1),
+    a: rnd() * TAU,
+    size: 0.6 + rnd() * 0.7,
+    spin: rnd() * TAU,
+  }))
+}
+
+// flat, crossing orbit rings (seen almost edge-on, like rings around a planet)
+const RINGS = [
+  { r: 1.62, tilt: 0.12, roll: 0.3, speed: 0.55 },
+  { r: 1.82, tilt: -0.06, roll: -0.4, speed: -0.38 },
+]
+
 /**
- * Simon's arc reactor. Rings turn slowly when idle, ripple while listening, spin up and sweep
- * while thinking, and the core pulses with the real loudness of Simon's voice while speaking.
- * Fills its container (square); `compact` draws fewer layers for small sizes.
+ * Simon's core: a slowly turning particle sphere with a glowing heart, orbit rings and drifting
+ * crystals. It ripples while listening, spins up while working, and its surface waves with the
+ * real loudness of Simon's voice while speaking. Fills its container; `compact` for small sizes.
  */
-export default function Reactor({ state = 'idle', compact = false }) {
+export default function Reactor({ state = 'idle', compact: forceCompact = false }) {
   const wrapRef = useRef(null)
   const canvasRef = useRef(null)
   const stateRef = useRef(state)
@@ -40,20 +100,33 @@ export default function Reactor({ state = 'idle', compact = false }) {
     const canvas = canvasRef.current
     const ctx = canvas.getContext('2d')
     let W = 0
+    let H = 0
     let dpr = 1
     let colors = readColors(canvas)
     let paint = null // repaints at once after a resize (resizing a canvas clears it)
+    let model = null
+    let compact = forceCompact
 
     const fit = () => {
       const r = wrapRef.current.getBoundingClientRect()
       dpr = Math.min(window.devicePixelRatio || 1, 2)
-      W = Math.max(1, Math.floor(Math.min(r.width, r.height)))
+      W = Math.max(1, Math.floor(r.width))
+      H = Math.max(1, Math.floor(r.height))
       canvas.width = Math.round(W * dpr)
-      canvas.height = Math.round(W * dpr)
+      canvas.height = Math.round(H * dpr)
       canvas.style.width = `${W}px`
-      canvas.style.height = `${W}px`
+      canvas.style.height = `${H}px`
+      const small = forceCompact || Math.min(W, H) < 110
+      if (!model || small !== compact) {
+        compact = small
+        model = { sphere: buildSphere(compact ? 150 : 680), shards: compact ? [] : buildShards(11) }
+        sx = new Float32Array(model.sphere.pts.length / 3)
+        sy = new Float32Array(sx.length)
+        sz = new Float32Array(sx.length)
+      }
       paint?.()
     }
+    let sx, sy, sz
     const ro = new ResizeObserver(fit)
     ro.observe(wrapRef.current)
     fit()
@@ -61,38 +134,15 @@ export default function Reactor({ state = 'idle', compact = false }) {
     mo.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] })
 
     const still = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
-    const N = compact ? 40 : 90
-    const bars = new Float32Array(N)
     let energy = 0.25
     let speed = 1
     let think = 0
     let hear = 0
-    let phase = 0
+    let lvlS = 0
+    let rotY = 0.6
     let last = performance.now()
     let raf = 0
     let timer = 0
-
-    const ring = (r, a0, a1, lw, color, alpha) => {
-      ctx.beginPath()
-      ctx.arc(0, 0, r, a0, a1)
-      ctx.lineWidth = lw
-      ctx.strokeStyle = color
-      ctx.globalAlpha = alpha
-      ctx.stroke()
-    }
-    const dashes = (r, count, gap, rot, lw, color, alpha) => {
-      const seg = TAU / count
-      ctx.beginPath()
-      for (let k = 0; k < count; k++) {
-        const a = rot + k * seg
-        ctx.moveTo(Math.cos(a + gap * seg / 2) * r, Math.sin(a + gap * seg / 2) * r)
-        ctx.arc(0, 0, r, a + gap * seg / 2, a + seg - gap * seg / 2)
-      }
-      ctx.lineWidth = lw
-      ctx.strokeStyle = color
-      ctx.globalAlpha = alpha
-      ctx.stroke()
-    }
 
     const draw = (now) => {
       const dt = Math.min(0.05, (now - last) / 1000)
@@ -102,152 +152,269 @@ export default function Reactor({ state = 'idle', compact = false }) {
       let lvl = 0
       if (s === 'speaking') {
         const real = voiceLevel()
-        lvl = real ?? (0.4 + 0.3 * Math.sin(T * 11) * Math.sin(T * 4.3))
+        lvl = real ?? (0.45 + 0.35 * Math.sin(T * 11) * Math.sin(T * 4.3))
       }
-      const targetE = { listening: 0.75, thinking: 0.6, speaking: 0.45 + 0.55 * lvl }[s] ?? 0.25
-      const targetS = { listening: 1.8, thinking: 3.4, speaking: 1.5 }[s] ?? 1
       const k = still ? 1 : Math.min(1, dt * 6)
-      energy += (targetE - energy) * k
-      speed += (targetS - speed) * Math.min(1, dt * 2.5)
+      lvlS += (lvl - lvlS) * (still ? 1 : Math.min(1, dt * 18))
+      energy += (({ listening: 0.7, thinking: 0.6, speaking: 0.45 + 0.55 * lvlS }[s] ?? 0.22) - energy) * k
+      speed += (({ listening: 1.6, thinking: 4.2, speaking: 1.4 }[s] ?? 1) - speed) * Math.min(1, dt * 2.5)
       think += ((s === 'thinking' ? 1 : 0) - think) * k
       hear += ((s === 'listening' ? 1 : 0) - hear) * k
-      phase += dt * speed
-      const t = still ? 0 : phase
+      if (!still) rotY += dt * 0.16 * speed
 
-      const c = W / 2
-      const R = c * 0.96
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-      ctx.clearRect(0, 0, W, W)
-      ctx.translate(c, c)
-      ctx.lineCap = 'butt'
+      const { sphere, shards } = model
+      const n = sx.length
+      const cx = W / 2
+      const cy = H / 2
+      const half = Math.min(W, H) / 2
+      const Rs = half * (compact ? 0.74 : W / H < 1.25 ? 0.44 : 0.52) // narrow screens: keep the rings inside
+      const tilt = 0.34 + 0.07 * Math.sin(T * 0.27)
+      const cY = Math.cos(rotY), sY = Math.sin(rotY), cX = Math.cos(tilt), sX = Math.sin(tilt)
+      const dark = colors.dark
+      const boost = dark ? 1 : 1.5
       const glow = colors.glow
+      const pointColor = dark ? colors.hi : colors.line
+      const accent = hear > 0.5 ? colors.ok : think > 0.5 ? colors.amber : colors.hi
 
-      // ---- outer instrument ring: fine ticks and a slow orbit
-      if (!compact) {
-        const major = new Path2D()
-        const minor = new Path2D()
-        for (let i = 0; i < 120; i++) {
-          const a = (i / 120) * TAU + t * 0.03
-          const big = i % 10 === 0
-          const r2 = R * 0.995
-          const r1 = r2 - (big ? R * 0.055 : R * 0.025)
-          const p = big ? major : minor
-          p.moveTo(Math.cos(a) * r1, Math.sin(a) * r1)
-          p.lineTo(Math.cos(a) * r2, Math.sin(a) * r2)
-        }
-        ctx.lineWidth = Math.max(1, R * 0.006)
-        ctx.strokeStyle = colors.line
-        ctx.globalAlpha = 0.22
-        ctx.stroke(minor)
-        ctx.globalAlpha = 0.6
-        ctx.stroke(major)
-        ring(R * 0.925, 0, TAU, Math.max(1, R * 0.004), colors.line, 0.2)
-        const oa = t * 0.45
-        ctx.globalAlpha = 0.95
-        ctx.fillStyle = colors.hi
-        ctx.beginPath()
-        ctx.arc(Math.cos(oa) * R * 0.925, Math.sin(oa) * R * 0.925, Math.max(1.5, R * 0.013), 0, TAU)
-        ctx.fill()
-      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+      ctx.clearRect(0, 0, W, H)
+      ctx.globalCompositeOperation = dark ? 'lighter' : 'source-over'
 
-      // ---- segmented ring with an amber marker
-      const r2 = R * (compact ? 0.95 : 0.86)
-      const rot2 = -t * 0.1
-      const lw2 = Math.max(1, R * (compact ? 0.03 : 0.012))
-      for (const [a0, a1] of [[0, 0.3], [0.36, 0.58], [0.64, 0.92]]) ring(r2, rot2 + a0 * TAU, rot2 + a1 * TAU, lw2, colors.line, 0.55)
-      if (!compact) ring(r2, t * 0.32, t * 0.32 + 0.2, R * 0.024, colors.amber, 0.9)
-
-      // ---- listening ripples
-      if (hear > 0.02 && !compact) {
-        for (let i = 0; i < 3; i++) {
-          const f = ((T * 0.7 + i / 3) % 1)
-          ring(R * (0.42 + f * 0.56), 0, TAU, Math.max(1, R * 0.008), colors.hi, (1 - f) * 0.5 * hear)
-        }
-      }
-
-      // ---- thinking sweep
-      if (think > 0.02) {
-        const base = T * 2.6
-        const rs = R * (compact ? 0.8 : 0.765)
-        for (let i = 0; i < 10; i++) {
-          ring(rs, base - (i + 1) * 0.09, base - i * 0.09, R * (compact ? 0.12 : 0.085), colors.line, (1 - i / 10) * 0.35 * think)
-        }
-      }
-
-      // ---- spectrum bars (voice / listening / thinking)
-      const b0 = R * (compact ? 0.66 : 0.68)
-      const bl = R * (compact ? 0.2 : 0.14)
-      ctx.lineWidth = Math.max(1, R * (compact ? 0.035 : 0.011))
-      ctx.strokeStyle = colors.hi
-      ctx.lineCap = 'round'
-      for (let i = 0; i < N; i++) {
-        let target
-        if (s === 'listening') target = 0.2 + 0.8 * Math.abs(Math.sin(T * 6.3 + i * 1.7) * Math.sin(T * 2.1 + i * 0.6))
-        else if (s === 'speaking') target = 0.08 + lvl * (0.35 + 0.65 * Math.abs(Math.sin(i * 0.93 + T * 9)))
-        else if (s === 'thinking') {
-          const d = ((((i / N) - ((T * 0.42) % 1)) % 1) + 1) % 1
-          target = 0.1 + 0.9 * Math.max(0, 1 - d * 5)
-        } else target = 0.1 + 0.1 * (0.5 + 0.5 * Math.sin(T * 1.2 - i * 0.25))
-        bars[i] += (target - bars[i]) * (still ? 1 : Math.min(1, dt * 10))
-        const a = (i / N) * TAU - Math.PI / 2
-        const r1 = b0
-        const rr = b0 + R * 0.015 + bl * bars[i]
-        ctx.globalAlpha = 0.2 + 0.75 * bars[i]
-        ctx.beginPath()
-        ctx.moveTo(Math.cos(a) * r1, Math.sin(a) * r1)
-        ctx.lineTo(Math.cos(a) * rr, Math.sin(a) * rr)
-        ctx.stroke()
-      }
-      ctx.lineCap = 'butt'
-
-      // ---- heavy dashed ring (glowing)
-      ctx.shadowColor = colors.line
-      ctx.shadowBlur = R * 0.07 * glow * (0.5 + energy)
-      dashes(R * (compact ? 0.5 : 0.58), compact ? 8 : 10, 0.34, t * 0.22, R * (compact ? 0.09 : 0.048), colors.line, 0.88)
-      ctx.shadowBlur = 0
-
-      if (!compact) {
-        dashes(R * 0.48, 24, 0.45, -t * 0.36, R * 0.022, colors.line, 0.7)
-        ring(R * 0.415, 0, TAU, Math.max(1, R * 0.005), colors.line, 0.35)
-      }
-
-      // ---- core
-      const rc = R * ((compact ? 0.3 : 0.27) + 0.05 * energy + 0.05 * lvl)
-      ctx.globalCompositeOperation = colors.blend === 'lighter' ? 'lighter' : 'source-over'
-      const halo = ctx.createRadialGradient(0, 0, rc * 0.3, 0, 0, R * 0.8)
+      // ---- halo behind the sphere
+      const halo = ctx.createRadialGradient(cx, cy, Rs * 0.1, cx, cy, Rs * 1.7)
       halo.addColorStop(0, colors.core)
       halo.addColorStop(1, clear(colors.core))
-      ctx.globalAlpha = (0.18 + 0.3 * energy) * glow
+      ctx.globalAlpha = (0.1 + 0.22 * energy) * glow
       ctx.fillStyle = halo
-      ctx.beginPath()
-      ctx.arc(0, 0, R * 0.8, 0, TAU)
-      ctx.fill()
+      ctx.fillRect(0, 0, W, H)
 
-      const body = ctx.createRadialGradient(0, 0, 0, 0, 0, rc)
-      body.addColorStop(0, colors.coreHi)
-      body.addColorStop(0.32, colors.coreHi)
-      body.addColorStop(0.62, colors.core)
+      // ---- horizontal light streak across the whole stage
+      if (!compact) {
+        const a = (0.22 + 0.55 * energy + 0.5 * lvlS) * (dark ? 1 : 0.7)
+        const g = ctx.createLinearGradient(0, 0, W, 0)
+        g.addColorStop(0, clear(colors.core))
+        g.addColorStop(0.5, colors.core)
+        g.addColorStop(1, clear(colors.core))
+        ctx.fillStyle = g
+        ctx.globalAlpha = a * 0.18
+        ctx.fillRect(0, cy - 9, W, 18)
+        ctx.globalAlpha = a
+        ctx.fillRect(0, cy - 0.75, W, 1.5)
+        ctx.globalAlpha = a * 0.35
+        ctx.fillRect(W * 0.12, cy - 7, W * 0.76, 1)
+        ctx.fillRect(W * 0.2, cy + 6, W * 0.6, 1)
+      }
+
+      // ---- orbit rings (back halves first) and crystals behind the sphere
+      const ringPts = (ring) => {
+        const out = []
+        const roll = ring.roll + 0.12 * Math.sin(T * 0.2 + ring.r)
+        const cT = Math.cos(ring.tilt), sT = Math.sin(ring.tilt), cR = Math.cos(roll), sR = Math.sin(roll)
+        for (let i = 0; i <= 96; i++) {
+          const a = (i / 96) * TAU
+          let x = Math.cos(a) * ring.r, y = 0, z = Math.sin(a) * ring.r
+          const y1 = y * cT - z * sT; const z1 = y * sT + z * cT; y = y1; z = z1
+          const x2 = x * cR - y * sR; const y2 = x * sR + y * cR; x = x2; y = y2
+          const y3 = y * cX - z * sX; const z3 = y * sX + z * cX
+          const p = 3 / (3 - z3)
+          out.push([cx + x * Rs * p, cy + y3 * Rs * p, z3])
+        }
+        return out
+      }
+      const rings = (compact ? RINGS.slice(0, 1) : RINGS).map(ringPts)
+      const strokeRing = (pts, front) => {
+        ctx.beginPath()
+        for (let i = 0; i < pts.length - 1; i++) {
+          const z = (pts[i][2] + pts[i + 1][2]) / 2
+          if ((z >= 0) !== front) continue
+          ctx.moveTo(pts[i][0], pts[i][1])
+          ctx.lineTo(pts[i + 1][0], pts[i + 1][1])
+        }
+        ctx.lineWidth = compact ? 1 : 1.3
+        ctx.strokeStyle = colors.line
+        ctx.globalAlpha = (front ? 0.75 : 0.25) * (0.7 + 0.4 * energy)
+        ctx.stroke()
+      }
+      rings.forEach((pts) => strokeRing(pts, false))
+
+      const shardPos = shards.map((sh) => {
+        const a = sh.a + T * sh.speed * speed
+        const r = sh.r + 0.28 * lvlS + 0.04 * Math.sin(T + sh.spin)
+        let x = Math.cos(a) * r, y = 0, z = Math.sin(a) * r
+        const cT = Math.cos(sh.tilt), sT = Math.sin(sh.tilt)
+        const y1 = y * cT - z * sT; const z1 = y * sT + z * cT; y = y1; z = z1
+        const x2 = x * Math.cos(sh.roll) - y * Math.sin(sh.roll); const y2 = x * Math.sin(sh.roll) + y * Math.cos(sh.roll); x = x2; y = y2
+        const y3 = y * cX - z * sX; const z3 = y * sX + z * cX
+        const p = 3 / (3 - z3)
+        return { sh, x: cx + x * Rs * p, y: cy + y3 * Rs * p, z: z3, p }
+      })
+      const drawShard = ({ sh, x, y, z, p }) => {
+        const size = Rs * 0.045 * sh.size * p
+        const rot = sh.spin + T * 0.6 * Math.sign(sh.speed)
+        ctx.beginPath()
+        for (let i = 0; i < 4; i++) {
+          const a = rot + (i * Math.PI) / 2
+          const rr = i % 2 ? size * 0.62 : size
+          ctx[i ? 'lineTo' : 'moveTo'](x + Math.cos(a) * rr, y + Math.sin(a) * rr)
+        }
+        ctx.closePath()
+        const depth = 0.35 + 0.65 * ((z + 1.8) / 3.6)
+        ctx.globalAlpha = 0.16 * depth * boost
+        ctx.fillStyle = pointColor
+        ctx.fill()
+        ctx.globalAlpha = 0.75 * depth
+        ctx.lineWidth = 1
+        ctx.strokeStyle = pointColor
+        ctx.stroke()
+        ctx.beginPath() // a facet line gives the crystal some volume
+        ctx.moveTo(x + Math.cos(rot) * size, y + Math.sin(rot) * size)
+        ctx.lineTo(x + Math.cos(rot + Math.PI) * size, y + Math.sin(rot + Math.PI) * size)
+        ctx.globalAlpha = 0.35 * depth
+        ctx.stroke()
+      }
+      shardPos.filter((q) => q.z < 0).forEach(drawShard)
+
+      // ---- plasma body and rim light
+      const bodyR = Rs * (1.04 + 0.06 * lvlS)
+      const body = ctx.createRadialGradient(cx, cy, 0, cx, cy, bodyR)
+      body.addColorStop(0, colors.core)
+      body.addColorStop(0.7, colors.core)
       body.addColorStop(1, clear(colors.core))
-      ctx.globalAlpha = 0.75 + 0.25 * energy
+      ctx.globalAlpha = (0.08 + 0.1 * energy) * (dark ? 1 : 0.6)
       ctx.fillStyle = body
       ctx.beginPath()
-      ctx.arc(0, 0, rc, 0, TAU)
+      ctx.arc(cx, cy, bodyR, 0, TAU)
       ctx.fill()
-      ctx.globalCompositeOperation = 'source-over'
-
-      // plasma threads turning inside the core
       if (!compact) {
-        for (let i = 0; i < 3; i++) {
-          const a = t * (1.2 + i * 0.35) + i * 2.1
-          ring(rc * (0.55 + i * 0.12), a, a + 1.1, Math.max(1, R * 0.006), colors.coreHi, 0.35 + 0.3 * energy)
+        ctx.globalAlpha = 0.22 + 0.25 * energy
+        ctx.lineWidth = 1.2
+        ctx.strokeStyle = colors.line
+        ctx.beginPath()
+        ctx.arc(cx, cy, Rs * (1.02 + 0.05 * lvlS), 0, TAU)
+        ctx.stroke()
+      }
+
+      // ---- sphere: displace, rotate, project
+      const { pts, phase, edges } = sphere
+      for (let i = 0; i < n; i++) {
+        const x = pts[i * 3], y = pts[i * 3 + 1], z = pts[i * 3 + 2]
+        const ph = phase[i]
+        let f = 1 + 0.02 * Math.sin(T * 0.9) + 0.012 * Math.sin(T * 1.4 + ph)
+        if (hear > 0.01) f += hear * 0.06 * Math.sin(T * 6 - y * 7 + ph * 0.3)
+        if (think > 0.01) f += think * 0.035 * Math.sin(T * 9 + ph)
+        if (lvlS > 0.01) f += lvlS * (0.05 + 0.17 * (0.5 + 0.5 * Math.sin(y * 6 + T * 11 + ph * 0.7)))
+        const x1 = (x * cY - z * sY) * f
+        const z1 = (x * sY + z * cY) * f
+        const y1 = y * f
+        const y2 = y1 * cX - z1 * sX
+        const z2 = y1 * sX + z1 * cX
+        const p = 3 / (3 - z2)
+        sx[i] = cx + x1 * Rs * p
+        sy[i] = cy + y2 * Rs * p
+        sz[i] = z2
+      }
+
+      // web between neighbours, three depth layers
+      if (!compact) {
+        const layers = [new Path2D(), new Path2D(), new Path2D()]
+        for (let e = 0; e < edges.length; e += 2) {
+          const a = edges[e], b = edges[e + 1]
+          const z = (sz[a] + sz[b]) / 2
+          const L = layers[z < -0.3 ? 0 : z < 0.35 ? 1 : 2]
+          L.moveTo(sx[a], sy[a])
+          L.lineTo(sx[b], sy[b])
+        }
+        ctx.lineWidth = 0.7
+        ctx.strokeStyle = colors.line
+        const base = (0.75 + 0.6 * energy) * boost
+        ;[0.07, 0.14, 0.26].forEach((a, i) => { ctx.globalAlpha = Math.min(1, a * base); ctx.stroke(layers[i]) })
+      }
+
+      // particles, three depth layers, plus a few bright "hot" ones
+      const sizes = compact ? [0.9, 1.2, 1.6] : [1.1, 1.6, 2.2]
+      const alphas = [0.3, 0.55, 0.95]
+      ctx.fillStyle = pointColor
+      for (let L = 0; L < 3; L++) {
+        ctx.globalAlpha = alphas[L] * (0.75 + 0.35 * energy)
+        const sz2 = sizes[L]
+        ctx.beginPath()
+        for (let i = 0; i < n; i++) {
+          const z = sz[i]
+          const layer = z < -0.3 ? 0 : z < 0.35 ? 1 : 2
+          if (layer !== L) continue
+          ctx.rect(sx[i] - sz2 / 2, sy[i] - sz2 / 2, sz2, sz2)
+        }
+        ctx.fill()
+      }
+      if (!compact) {
+        for (let i = 0; i < n; i += 19) {
+          if (sz[i] < 0) continue
+          const tw = 0.5 + 0.5 * Math.sin(T * 2.3 + phase[i] * 3)
+          ctx.globalAlpha = (0.25 + 0.5 * tw) * (dark ? 0.6 : 0.5)
+          ctx.fillStyle = accent
+          ctx.beginPath()
+          ctx.arc(sx[i], sy[i], 3.2 + 1.6 * tw, 0, TAU)
+          ctx.fill()
+          ctx.globalAlpha = 0.95
+          ctx.fillStyle = dark ? colors.coreHi : colors.hi
+          ctx.beginPath()
+          ctx.arc(sx[i], sy[i], 1.4, 0, TAU)
+          ctx.fill()
         }
       }
+
+      // ---- heart of the sphere with a small reticle
+      const rc = Rs * ((compact ? 0.42 : 0.24) + 0.06 * energy + 0.2 * lvlS)
+      const heart = ctx.createRadialGradient(cx, cy, 0, cx, cy, rc)
+      heart.addColorStop(0, colors.coreHi)
+      heart.addColorStop(0.28, colors.coreHi)
+      heart.addColorStop(0.55, colors.core)
+      heart.addColorStop(1, clear(colors.core))
+      ctx.globalAlpha = 0.85 + 0.15 * energy
+      ctx.fillStyle = heart
+      ctx.beginPath()
+      ctx.arc(cx, cy, rc, 0, TAU)
+      ctx.fill()
+      if (!compact) {
+        ctx.strokeStyle = colors.line
+        ctx.lineWidth = 1
+        for (const [r, dash, dir] of [[0.32, 6, 1], [0.4, 14, -1]]) {
+          ctx.globalAlpha = 0.45 + 0.3 * energy
+          ctx.beginPath()
+          const seg = TAU / dash
+          for (let i = 0; i < dash; i++) {
+            const a = i * seg + T * 0.5 * dir * speed
+            ctx.moveTo(cx + Math.cos(a) * Rs * r, cy + Math.sin(a) * Rs * r)
+            ctx.arc(cx, cy, Rs * r, a, a + seg * 0.55)
+          }
+          ctx.stroke()
+        }
+        ctx.globalAlpha = 0.16 // faint crosshair
+        ctx.beginPath()
+        ctx.moveTo(cx, cy - Rs * 1.05); ctx.lineTo(cx, cy + Rs * 1.05)
+        ctx.stroke()
+      }
+
+      // ---- front halves of the rings, their travelling lights, and the near crystals
+      rings.forEach((pts, i) => {
+        strokeRing(pts, true)
+        const pos = ((T * RINGS[i].speed * speed * 0.25) % 1 + 1) % 1
+        const q = pts[Math.floor(pos * 96)]
+        if (q[2] < 0 && compact) return
+        ctx.globalAlpha = q[2] < 0 ? 0.35 : 1
+        ctx.fillStyle = accent
+        ctx.beginPath()
+        ctx.arc(q[0], q[1], compact ? 1.6 : 2.6, 0, TAU)
+        ctx.fill()
+      })
+      shardPos.filter((q) => q.z >= 0).forEach(drawShard)
+
+      ctx.globalCompositeOperation = 'source-over'
       ctx.globalAlpha = 1
     }
 
     paint = () => draw(performance.now())
     paint()
-
     const loop = (now) => {
       draw(now)
       raf = requestAnimationFrame(loop)
@@ -263,7 +430,7 @@ export default function Reactor({ state = 'idle', compact = false }) {
       ro.disconnect()
       mo.disconnect()
     }
-  }, [compact])
+  }, [forceCompact])
 
   return (
     <span ref={wrapRef} className={`reactor reactor-${state}`}>

@@ -2,13 +2,15 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, getToken, login, setToken, streamChat } from './api.js'
 import { listen, speak, stopSpeaking, unlockAudio } from './voice.js'
 import { ActivityPanel, HistoryPanel, MemoryPanel, SystemsPanel } from './panels.jsx'
-import { Brain, Feed, Panel, ProviderList, Sessions, Telemetry, pad } from './hud.jsx'
+import { Brain, Feed, Panel, ProviderList, Sessions, Telemetry } from './hud.jsx'
+import { currentLang, locale, plural, speechLang, t, useLang } from './i18n.js'
 import { useTheme } from './theme.js'
 import Chart from './Chart.jsx'
 import Reactor from './Reactor.jsx'
 import Icon from './icons.jsx'
 
 export default function App() {
+  useLang() // re-render everything when the interface language changes
   const [authed, setAuthed] = useState(!!getToken())
   const [needLogin, setNeedLogin] = useState(null) // asked from the server: login page on or off
   useEffect(() => {
@@ -31,19 +33,24 @@ export default function App() {
 function ThemeToggle() {
   const [theme, toggle] = useTheme()
   return (
-    <button className="icon-btn" onClick={toggle} aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
-            title={theme === 'dark' ? 'Light theme' : 'Dark theme'}>
+    <button className="icon-btn" onClick={toggle} aria-label={theme === 'dark' ? t('toLight') : t('toDark')}
+            title={theme === 'dark' ? t('lightTheme') : t('darkTheme')}>
       <Icon name={theme === 'dark' ? 'sun' : 'moon'} />
     </button>
   )
 }
 
-function Wordmark({ big = false }) {
+function LangToggle() {
+  const [lang, setLang] = useLang()
   return (
-    <span className={big ? 'wordmark big' : 'wordmark'} aria-label="Simon">
-      S.I.M.O.N
-    </span>
+    <button className="lang-btn" onClick={() => setLang(lang === 'de' ? 'en' : 'de')} aria-label={t('langSwitch')} title={t('langSwitch')}>
+      <span className={lang === 'de' ? 'on' : ''}>DE</span><span className={lang === 'en' ? 'on' : ''}>EN</span>
+    </button>
   )
+}
+
+function Wordmark({ big = false }) {
+  return <span className={big ? 'wordmark big' : 'wordmark'} aria-label="Simon">S.I.M.O.N</span>
 }
 
 /* ------------------------------------------------------------------ login */
@@ -60,15 +67,15 @@ function Login({ onDone }) {
   }
   return (
     <div className="login">
-      <div className="login-theme"><ThemeToggle /></div>
+      <div className="login-theme"><LangToggle /><ThemeToggle /></div>
       <div className="login-card">
         <div className="login-reactor"><Reactor state={busy ? 'thinking' : 'idle'} /></div>
         <Wordmark big />
-        <p className="eyebrow">Authorization required</p>
+        <p className="eyebrow">{t('loginNeeded')}</p>
         <form onSubmit={submit} className="login-form">
-          <input type="password" placeholder="Password" value={pw} onChange={(e) => setPw(e.target.value)}
-                 autoFocus autoComplete="current-password" aria-label="Password" />
-          <button className="btn primary icon-only" disabled={!pw || busy} aria-label="Sign in"><Icon name="arrowUp" className="rot90" /></button>
+          <input type="password" placeholder={t('password')} value={pw} onChange={(e) => setPw(e.target.value)}
+                 autoFocus autoComplete="current-password" aria-label={t('password')} />
+          <button className="btn primary icon-only" disabled={!pw || busy} aria-label={t('signIn')}><Icon name="arrowUp" className="rot90" /></button>
         </form>
         <p className="login-err" role="alert">{err}</p>
       </div>
@@ -78,30 +85,29 @@ function Login({ onDone }) {
 
 /* ------------------------------------------------------------------ shell */
 const TABS = [
-  ['core', 'Core', 'core'],
-  ['history', 'Sessions', 'history'],
-  ['memory', 'Memory', 'memory'],
-  ['activity', 'Activity', 'activity'],
-  ['systems', 'Systems', 'cpu'],
+  ['core', 'tabCore', 'core'],
+  ['history', 'tabSessions', 'history'],
+  ['memory', 'tabMemory', 'memory'],
+  ['activity', 'tabActivity', 'activity'],
+  ['systems', 'tabSystems', 'cpu'],
 ]
 
 function Clock() {
   const [now, setNow] = useState(() => new Date())
   useEffect(() => {
-    const t = setInterval(() => setNow(new Date()), 1000)
-    return () => clearInterval(t)
+    const timer = setInterval(() => setNow(new Date()), 1000)
+    return () => clearInterval(timer)
   }, [])
   return (
-    <span className="clock" aria-label="Current time">
-      <span className="clock-time">{now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })}</span>
-      <span className="clock-date">{now.toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' })}</span>
+    <span className="clock">
+      <span className="clock-time">{now.toLocaleTimeString(locale(), { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })}</span>
+      <span className="clock-date">{now.toLocaleDateString(locale(), { weekday: 'short', day: 'numeric', month: 'short' })}</span>
     </span>
   )
 }
 
 function Shell({ canLogout }) {
   const [view, setView] = useState('core')
-  const [me, setMe] = useState({ assistant_name: 'SIMON', speech_lang: 'en-US' })
   const [convs, setConvs] = useState([])
   const [convId, setConvId] = useState(null)
   const [alerts, setAlerts] = useState([])
@@ -110,7 +116,7 @@ function Shell({ canLogout }) {
   const [providers, setProviders] = useState([])
   const [memories, setMemories] = useState([])
   const [activity, setActivity] = useState([])
-  const [orb, setOrb] = useState('idle') // shared with the status bar
+  const [orb, setOrb] = useState('idle') // shared with the telemetry panel
   const seen = useRef(new Set())
 
   const refreshConvs = useCallback(() => api('/conversations').then(setConvs).catch(() => {}), [])
@@ -123,11 +129,10 @@ function Shell({ canLogout }) {
   const refreshAll = useCallback(() => { refreshConvs(); refreshDeck() }, [refreshConvs, refreshDeck])
 
   useEffect(() => {
-    api('/me').then(setMe).catch(() => {})
     refreshAll()
     fetch('/api/health').then((r) => r.json()).then((h) => setSetup(h.problems || [])).catch(() => {})
-    const t = setInterval(() => { if (!document.hidden) refreshDeck() }, 15000)
-    return () => clearInterval(t)
+    const timer = setInterval(() => { if (!document.hidden) refreshDeck() }, 15000)
+    return () => clearInterval(timer)
   }, [refreshAll, refreshDeck])
 
   // Reminders: every open device polls; due reminders pop up and are spoken.
@@ -142,13 +147,13 @@ function Shell({ canLogout }) {
         fresh.forEach((r) => {
           if ('Notification' in window && Notification.permission === 'granted') new Notification('Simon', { body: r.text })
         })
-        speak(`Reminder: ${fresh.map((r) => r.text).join('. ')}`, me.speech_lang)
+        speak(t('reminder', { text: fresh.map((r) => r.text).join('. ') }), speechLang())
       } catch { /* offline */ }
     }
     poll()
-    const t = setInterval(poll, 20000)
-    return () => clearInterval(t)
-  }, [me.speech_lang])
+    const timer = setInterval(poll, 20000)
+    return () => clearInterval(timer)
+  }, [])
 
   const dismiss = (id) => {
     setAlerts((a) => a.filter((r) => r.id !== id))
@@ -163,29 +168,29 @@ function Shell({ canLogout }) {
     <div className={`os view-${view}`}>
       <header className="topbar hud">
         <Wordmark />
-        <span className="edition">Agent OS · personal edition</span>
+        <span className="edition">{t('edition')}</span>
         <span className="grow" />
-        <div className="pills" aria-label="System status">
-          <span className={`pill ${free ? 'ok' : 'amber'}`}><i />{free ? 'Free mode · active' : `Paid calls · ${stats.paid_answers}`}</span>
-          <span className="pill">Brain · {stats?.last_provider || providers[0]?.name || '—'}</span>
-          <span className="pill wide-only">Answers · {stats?.answers ?? '—'}</span>
-          <span className="pill wide-only">Memories · {stats?.memories ?? '—'}</span>
-          <span className="pill wide-only">Tools · {stats?.tools_run ?? '—'}</span>
+        <div className="pills" aria-label="Status">
+          <span className={`pill ${free ? 'ok' : 'amber'}`}><i />{free ? t('freeMode') : t('paidCalls', { n: stats.paid_answers })}</span>
+          <span className="pill">{t('brain')} · {stats?.last_provider || providers[0]?.name || '—'}</span>
+          <span className="pill wide-only">{t('answersPill', { n: stats?.answers ?? '—' })}</span>
+          <span className="pill wide-only">{t('memoriesPill', { n: stats?.memories ?? '—' })}</span>
+          <span className="pill wide-only">{t('toolsPill', { n: stats?.tools_run ?? '—' })}</span>
         </div>
         <Clock />
+        <LangToggle />
         <ThemeToggle />
         {canLogout && (
-          <button className="icon-btn" onClick={() => { setToken(null); location.reload() }} aria-label="Log out" title="Log out"><Icon name="logout" /></button>
+          <button className="icon-btn" onClick={() => { setToken(null); location.reload() }} aria-label={t('logout')} title={t('logout')}><Icon name="logout" /></button>
         )}
       </header>
 
       <div className="deck">
-        <aside className="wing wing-left" aria-label="Neural core">
-          <Panel title="Neural core" meta={`${providers.length} ${providers.length === 1 ? 'model' : 'models'}`}
-                 onOpen={() => setView('systems')} className="grow-panel">
+        <aside className="wing wing-left" aria-label={t('neuralCore')}>
+          <Panel title={t('neuralCore')} meta={plural('model', providers.length)} onOpen={() => setView('systems')} className="grow-panel">
             <div className="hud-scroll"><ProviderList providers={providers} stats={stats} /></div>
           </Panel>
-          <Panel title="Telemetry" meta={orb === 'idle' ? 'standby' : orb}>
+          <Panel title={t('telemetry')} meta={t(`s_${orb}`)}>
             <Telemetry stats={stats} />
           </Panel>
         </aside>
@@ -196,7 +201,7 @@ function Shell({ canLogout }) {
               <div className="alert setup" role="alert">
                 <Icon name="warn" size={18} />
                 <span className="grow">
-                  <b>Setup not finished.</b>
+                  <b>{t('setupTitle')}</b>
                   {setup.map((p) => <span key={p} className="setup-line">{p}</span>)}
                 </span>
               </div>
@@ -205,13 +210,12 @@ function Shell({ canLogout }) {
               <div key={r.id} className="alert">
                 <Icon name="bell" size={18} />
                 <span className="grow">{r.text}</span>
-                <button className="btn small" onClick={() => dismiss(r.id)}>Done</button>
+                <button className="btn small" onClick={() => dismiss(r.id)}>{t('done')}</button>
               </div>
             ))}
           </div>
           {view === 'core' && (
-            <ChatView me={me} convId={convId} setConvId={setConvId} onChanged={refreshAll}
-                      orb={orb} setOrb={setOrb} stats={stats} onNew={() => open(null)} />
+            <ChatView convId={convId} setConvId={setConvId} onChanged={refreshAll} orb={orb} setOrb={setOrb} onNew={() => open(null)} />
           )}
           {view === 'memory' && <MemoryPanel onBack={back} onChanged={refreshDeck} />}
           {view === 'activity' && <ActivityPanel onBack={back} />}
@@ -222,24 +226,24 @@ function Shell({ canLogout }) {
           )}
         </main>
 
-        <aside className="wing wing-right" aria-label="Memory and activity">
-          <Panel title="Second brain" meta={`${memories.length} ${memories.length === 1 ? 'note' : 'notes'}`} onOpen={() => setView('memory')}>
+        <aside className="wing wing-right" aria-label={t('secondBrain')}>
+          <Panel title={t('secondBrain')} meta={plural('note', memories.length)} onOpen={() => setView('memory')}>
             <Brain memories={memories} onPick={() => setView('memory')} />
           </Panel>
-          <Panel title="Sessions" meta={convs.length} onOpen={() => setView('history')} className="grow-panel">
-            <button className="btn-new" onClick={() => open(null)}><Icon name="plus" size={16} /> New session</button>
+          <Panel title={t('sessions')} meta={convs.length} onOpen={() => setView('history')} className="grow-panel">
+            <button className="btn-new" onClick={() => open(null)}><Icon name="plus" size={16} /> {t('newSession')}</button>
             <div className="hud-scroll"><Sessions convs={convs} convId={view === 'core' ? convId : null} onOpen={open} /></div>
           </Panel>
-          <Panel title="Live feed" onOpen={() => setView('activity')} className="grow-panel">
+          <Panel title={t('liveFeed')} onOpen={() => setView('activity')} className="grow-panel">
             <div className="hud-scroll"><Feed items={activity} /></div>
           </Panel>
         </aside>
       </div>
 
-      <nav className="tabbar" aria-label="Sections">
+      <nav className="tabbar" aria-label="Navigation">
         {TABS.map(([k, label, icon]) => (
           <button key={k} className={view === k ? 'active' : ''} onClick={() => setView(k)} aria-current={view === k ? 'page' : undefined}>
-            <Icon name={icon} size={20} /><span>{label}</span>
+            <Icon name={icon} size={20} /><span>{t(label)}</span>
           </button>
         ))}
       </nav>
@@ -248,31 +252,18 @@ function Shell({ canLogout }) {
 }
 
 /* ------------------------------------------------------------------ chat */
-const TOOL_LABELS = {
-  get_weather: 'Checking the weather', get_crypto: 'Reading crypto markets', get_stock: 'Reading stock markets',
-  web_search: 'Searching the web', read_webpage: 'Reading a page', show_route: 'Planning the route',
-  create_reminder: 'Setting a reminder', list_reminders: 'Checking reminders', cancel_reminder: 'Cancelling a reminder',
-  remember: 'Saving to memory', search_memory: 'Searching memory', prepare_crypto_trade: 'Preparing the order',
-  confirm_action: 'Confirming', cancel_action: 'Cancelling',
-}
-
-const SUGGESTIONS = [
-  ['Weather', 'What will the weather be like tomorrow?'],
-  ['Markets', 'How is Bitcoin doing this week?'],
-  ['Reminder', 'Remind me to call the bank in one hour'],
-  ['Memory', 'What do you remember about me?'],
-]
-
-const STATE_LABELS = { idle: 'Standby', listening: 'Listening', thinking: 'Processing', speaking: 'Speaking' }
+const SUGGESTIONS = [['sWeather', 'qWeather'], ['sMarkets', 'qMarkets'], ['sReminder', 'qReminder'], ['sMemory', 'qMemory']]
+const STATES = ['idle', 'listening', 'thinking', 'speaking']
 
 function greeting() {
   const h = new Date().getHours()
-  return h < 5 ? 'Good night' : h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening'
+  return h >= 5 && h < 12 ? t('morning') : h >= 12 && h < 18 ? t('day') : t('evening')
 }
 
-const timeOf = (m) => new Date(m.created_at || m.at || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+const timeOf = (m) => new Date(m.created_at || m.at || Date.now()).toLocaleTimeString(locale(), { hour: '2-digit', minute: '2-digit' })
+const toolLabel = (name) => (t(`t_${name}`) === `t_${name}` ? name : t(`t_${name}`))
 
-function ChatView({ me, convId, setConvId, onChanged, orb, setOrb, stats, onNew }) {
+function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew }) {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
@@ -328,13 +319,13 @@ function ChatView({ me, convId, setConvId, onChanged, orb, setOrb, stats, onNew 
       onChanged()
       if (handsFreeRef.current && reply.trim()) {
         setOrb('speaking')
-        await speak(reply, me.speech_lang)
+        await speak(reply, speechLang())
         if (handsFreeRef.current) return startListening()
       }
       setOrb('idle')
     }
     try {
-      await streamChat({ message: text, conversation_id: convRef.current, allow_paid: allowPaid }, (ev) => {
+      await streamChat({ message: text, conversation_id: convRef.current, allow_paid: allowPaid, language: currentLang() }, (ev) => {
         if (ev.type === 'conversation' && ev.id !== convRef.current) {
           skipLoad.current = true
           convRef.current = ev.id
@@ -342,7 +333,7 @@ function ChatView({ me, convId, setConvId, onChanged, orb, setOrb, stats, onNew 
         } else if (ev.type === 'status') patchLast((m) => ({ ...m, status: ev.text }))
         else if (ev.type === 'provider') patchLast((m) => ({ ...m, provider: ev.name, model: ev.model }))
         else if (ev.type === 'token') { reply += ev.text; patchLast((m) => ({ ...m, status: null, content: m.content + ev.text })) }
-        else if (ev.type === 'tool') patchLast((m) => ({ ...m, tools: [...m.tools.filter((t) => t.name !== ev.name), ev] }))
+        else if (ev.type === 'tool') patchLast((m) => ({ ...m, tools: [...m.tools.filter((x) => x.name !== ev.name), ev] }))
         else if (['chart', 'link', 'approval'].includes(ev.type)) patchLast((m) => ({ ...m, cards: [...(m.cards || []), ev] }))
         else if (ev.type === 'paid_required') patchLast((m) => ({ ...m, paid: ev }))
         else if (ev.type === 'error') patchLast((m) => ({ ...m, error: ev.message }))
@@ -360,7 +351,7 @@ function ChatView({ me, convId, setConvId, onChanged, orb, setOrb, stats, onNew 
     setOrb('listening')
     setInterim('')
     try {
-      listener.current = listen(me.speech_lang, { onInterim: setInterim })
+      listener.current = listen(speechLang(), { onInterim: setInterim })
       const text = await listener.current.promise
       setInterim('')
       listener.current = null
@@ -368,7 +359,7 @@ function ChatView({ me, convId, setConvId, onChanged, orb, setOrb, stats, onNew 
     } catch (x) {
       listener.current = null
       setInterim('')
-      setMessages((ms) => [...ms, { role: 'assistant', content: '', error: `Microphone: ${x.message}`, tools: [], cards: [] }])
+      setMessages((ms) => [...ms, { role: 'assistant', content: '', error: t('mic', { m: x.message }), tools: [], cards: [] }])
     }
     setOrb('idle')
   }
@@ -383,7 +374,7 @@ function ChatView({ me, convId, setConvId, onChanged, orb, setOrb, stats, onNew 
     if (busy) return
     unlockAudio()
     setOrb('speaking')
-    await speak(text, me.speech_lang)
+    await speak(text, speechLang())
     setOrb('idle')
   }
 
@@ -410,104 +401,100 @@ function ChatView({ me, convId, setConvId, onChanged, orb, setOrb, stats, onNew 
   }
 
   const empty = messages.length === 0
-  const hint = { idle: 'Tap the core to talk', listening: 'Listening — tap to stop', thinking: 'Working on it', speaking: 'Speaking — tap to stop' }[orb]
+  const hint = t(`h_${orb}`)
   const lastAi = [...messages].reverse().find((m) => m.role === 'assistant')
-  const caption = interim || (orb === 'thinking' ? (lastAi?.status || 'Thinking') : null)
-  const brain = lastAi?.provider || stats?.last_provider
+  const caption = interim || (orb === 'thinking' ? (lastAi?.status || t('thinking')) : null)
 
   return (
     <div className={empty ? 'core welcome' : 'core live'}>
       <div className="core-body">
-      <section className="reactor-stage" aria-label="Simon">
-        <div className="reactor-frame">
-          <div className="stat-box tl"><span>Questions</span><b>{pad(stats?.questions ?? 0, 3)}</b></div>
-          <div className="stat-box tr"><span>Brain</span><b className="small">{brain || 'auto'}</b></div>
-          <div className="stat-box bl"><span>Tools run</span><b>{pad(stats?.tools_run ?? 0, 3)}</b></div>
-          <div className="stat-box br"><span>Memories</span><b>{pad(stats?.memories ?? 0, 3)}</b></div>
-          <button className="reactor-btn" onClick={micClick} aria-label={hint} title={hint}>
+        <section className="reactor-stage" aria-label="Simon">
+          <button className="reactor-frame" onClick={micClick} aria-label={hint} title={hint}>
             <Reactor state={orb} />
           </button>
-        </div>
-        <div className="stage-text">
-          <div className="pill-row">
-            <span className={`state-pill ${orb}`}><i />Simon · {STATE_LABELS[orb]}</span>
-            {!empty && (
-              <button className="new-session" onClick={onNew} title="Start a new session"><Icon name="plus" size={13} /> New</button>
+          <div className="stage-text">
+            {empty && <p className="core-name" aria-hidden="true">SIMON</p>}
+            <div className="pill-row">
+              <div className="states" role="status" aria-label={t(`s_${orb}`)}>
+                {STATES.map((s) => <span key={s} className={s === orb ? `on ${s}` : ''}>{t(`s_${s}`)}</span>)}
+              </div>
+              {!empty && (
+                <button className="new-session" onClick={onNew} title={t('startNew')}><Icon name="plus" size={13} /> {t('new')}</button>
+              )}
+            </div>
+            {empty ? (
+              <>
+                <h1 className="welcome-title">{greeting()}. <span>{t('online2')}</span></h1>
+                <p className="welcome-sub">{t('welcomeSub', { hint })}</p>
+              </>
+            ) : (
+              <p className="caption" aria-live="polite">{caption || hint}</p>
             )}
           </div>
+        </section>
+
+        <div className="scroll">
           {empty ? (
-            <>
-              <h1 className="welcome-title">{greeting()}. <span>All systems online.</span></h1>
-              <p className="welcome-sub">{hint}, or type below. Simon remembers what matters and asks before anything that costs money.</p>
-            </>
+            <div className="suggestions">
+              {SUGGESTIONS.map(([tag, q]) => (
+                <button key={q} onClick={() => send(t(q))}><span className="sugg-tag">{t(tag)}</span>{t(q)}</button>
+              ))}
+            </div>
           ) : (
-            <p className="caption" aria-live="polite">{caption || hint}</p>
+            <div className="thread">
+              {messages.map((m, i) => m.role === 'user' ? (
+                <div key={m.id || i} className="msg-user">
+                  <span className="msg-label">{t('you')} · {timeOf(m)}</span>
+                  <p>{m.content}</p>
+                </div>
+              ) : (
+                <article key={m.id || i} className="msg-ai">
+                  <header className="meta">
+                    <span className="meta-name">Simon</span><span>{timeOf(m)}</span>
+                    {m.provider && <span>{t('via', { p: m.provider })}</span>}
+                    <span className="grow" />
+                    {m.content && !(busy && i === messages.length - 1) && (
+                      <button className="replay" onClick={() => speakAgain(m.content)} aria-label={t('readAloudLong')} title={t('readAloud')}>
+                        <Icon name="speaker" size={15} />
+                      </button>
+                    )}
+                  </header>
+                  {m.tools?.length > 0 && (
+                    <ul className="toollog">
+                      {m.tools.map((x) => (
+                        <li key={x.name} className={x.status}>
+                          <span className="tick" />{toolLabel(x.name)}
+                          <span className="toolstate">{x.status === 'running' ? t('running') : x.status === 'error' ? t('failed') : t('finished')}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {/* charts and routes come before the answer (it refers to them), approvals after it */}
+                  {m.cards?.map((c, k) => c.type !== 'approval' && <Card key={k} card={c} />)}
+                  {m.content && <div className="prose">{renderText(m.content)}</div>}
+                  {m.cards?.map((c, k) => c.type === 'approval' && <Card key={k} card={c} onDecide={(id, v) => decide(i, id, v)} />)}
+                  {m.paid && (
+                    <div className="ticket warn">
+                      <div className="ticket-head"><span>{t('paidNeeded')}</span><span>{t('approval')}</span></div>
+                      <p className="ticket-body">{t('paidBody', { provider: m.paid.provider, model: m.paid.model })}</p>
+                      <p className="ticket-note">{t('cost', { c: m.paid.cost_note })}</p>
+                      <div className="ticket-actions">
+                        <button className="btn primary" onClick={() => send(null, { allowPaid: true })}>{t('usePaid')}</button>
+                        <button className="btn ghost" onClick={() => patchLast((x) => ({ ...x, paid: null }))}>{t('notNow')}</button>
+                      </div>
+                    </div>
+                  )}
+                  {m.error && <p className="msg-error">{m.error}</p>}
+                  {!m.content && !m.error && !m.paid && busy && i === messages.length - 1 && (
+                    <p className="thinking">{m.status || t('thinking')}<span className="dots"><i /><i /><i /></span></p>
+                  )}
+                </article>
+              ))}
+              {interim && <div className="msg-user interim"><span className="msg-label">{t('you')} · {t('live')}</span><p>{interim}</p></div>}
+              <div ref={bottom} className="thread-end" />
+            </div>
           )}
         </div>
-      </section>
-
-      <div className="scroll">
-        {empty ? (
-          <div className="suggestions">
-            {SUGGESTIONS.map(([tag, s]) => (
-              <button key={s} onClick={() => send(s)}><span className="sugg-tag">{tag}</span>{s}</button>
-            ))}
-          </div>
-        ) : (
-          <div className="thread">
-            {messages.map((m, i) => m.role === 'user' ? (
-              <div key={m.id || i} className="msg-user">
-                <span className="msg-label">You · {timeOf(m)}</span>
-                <p>{m.content}</p>
-              </div>
-            ) : (
-              <article key={m.id || i} className="msg-ai">
-                <header className="meta">
-                  <span className="meta-name">Simon</span><span>{timeOf(m)}</span>
-                  {m.provider && <span>via {m.provider}</span>}
-                  <span className="grow" />
-                  {m.content && !(busy && i === messages.length - 1) && (
-                    <button className="replay" onClick={() => speakAgain(m.content)} aria-label="Read this answer aloud" title="Read aloud">
-                      <Icon name="speaker" size={15} />
-                    </button>
-                  )}
-                </header>
-                {m.tools?.length > 0 && (
-                  <ul className="toollog">
-                    {m.tools.map((t) => (
-                      <li key={t.name} className={t.status}>
-                        <span className="tick" />{TOOL_LABELS[t.name] || t.name}
-                        <span className="toolstate">{t.status === 'running' ? 'running' : t.status === 'error' ? 'failed' : 'done'}</span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-                {/* charts and routes come before the answer (it refers to them), approvals after it */}
-                {m.cards?.map((c, k) => c.type !== 'approval' && <Card key={k} card={c} />)}
-                {m.content && <div className="prose">{renderText(m.content)}</div>}
-                {m.cards?.map((c, k) => c.type === 'approval' && <Card key={k} card={c} onDecide={(id, v) => decide(i, id, v)} />)}
-                {m.paid && (
-                  <div className="ticket warn">
-                    <div className="ticket-head"><span>Paid model needed</span><span>Approval</span></div>
-                    <p className="ticket-body">All free AI providers are busy. Use <b>{m.paid.provider}</b> ({m.paid.model}) for this answer?</p>
-                    <p className="ticket-note">Estimated cost: {m.paid.cost_note}</p>
-                    <div className="ticket-actions">
-                      <button className="btn primary" onClick={() => send(null, { allowPaid: true })}>Use paid model once</button>
-                      <button className="btn ghost" onClick={() => patchLast((x) => ({ ...x, paid: null }))}>Not now</button>
-                    </div>
-                  </div>
-                )}
-                {m.error && <p className="msg-error">{m.error}</p>}
-                {!m.content && !m.error && !m.paid && busy && i === messages.length - 1 && (
-                  <p className="thinking">{m.status || 'Thinking'}<span className="dots"><i /><i /><i /></span></p>
-                )}
-              </article>
-            ))}
-            {interim && <div className="msg-user interim"><span className="msg-label">You · live</span><p>{interim}</p></div>}
-            <div ref={bottom} className="thread-end" />
-          </div>
-        )}
-      </div>
       </div>
 
       <form className="composer" onSubmit={submit}>
@@ -516,23 +503,21 @@ function ChatView({ me, convId, setConvId, onChanged, orb, setOrb, stats, onNew 
             <Icon name={orb === 'listening' ? 'stop' : orb === 'speaking' ? 'speaker' : 'mic'} size={18} />
           </button>
           <textarea ref={textarea} rows={1} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={onKey}
-                    placeholder={orb === 'listening' ? 'Listening…' : 'Message Simon…'} aria-label="Message" />
-          <button className="send" disabled={busy || !input.trim()} aria-label="Send"><Icon name="arrowUp" size={18} /></button>
+                    placeholder={orb === 'listening' ? t('listeningPh') : t('placeholder')} aria-label={t('message')} />
+          <button className="send" disabled={busy || !input.trim()} aria-label={t('send')}><Icon name="arrowUp" size={18} /></button>
         </div>
         <div className="composer-meta">
           <label className="switch">
             <input type="checkbox" checked={handsFree} onChange={(e) => setHandsFree(e.target.checked)} />
             <span className="track"><span className="thumb" /></span>
-            Hands-free
+            {t('handsFree')}
           </label>
-          <span className="hint">Enter to send · Shift + Enter for a new line</span>
+          <span className="hint">{t('enterHint')}</span>
         </div>
       </form>
     </div>
   )
 }
-
-const STAMPS = { done: 'Executed', failed: 'Not executed', rejected: 'Rejected' }
 
 function Card({ card, onDecide }) {
   if (card.type === 'chart') return <Chart {...card} />
@@ -540,7 +525,7 @@ function Card({ card, onDecide }) {
     return (
       <a className="linkcard" href={card.url} target="_blank" rel="noreferrer">
         <span className="linkcard-icon"><Icon name="pin" /></span>
-        <span className="grow"><b>{card.title}</b><small>Open in Google Maps</small></span>
+        <span className="grow"><b>{card.title}</b><small>{t('maps')}</small></span>
         <Icon name="external" size={18} />
       </a>
     )
@@ -549,16 +534,16 @@ function Card({ card, onDecide }) {
     const a = card.action
     return (
       <div className={`ticket ${a.status}`}>
-        <div className="ticket-head"><span>Authorization required</span><span>No. {String(a.id).padStart(4, '0')}</span></div>
+        <div className="ticket-head"><span>{t('authRequired')}</span><span>{t('no')} {String(a.id).padStart(4, '0')}</span></div>
         <p className="ticket-body">{a.summary}</p>
         {a.status === 'pending' ? (
           <div className="ticket-actions">
-            <button className="btn primary" onClick={() => onDecide(a.id, 'approve')}><Icon name="check" size={18} /> Confirm</button>
-            <button className="btn ghost" onClick={() => onDecide(a.id, 'reject')}>Reject</button>
+            <button className="btn primary" onClick={() => onDecide(a.id, 'approve')}><Icon name="check" size={18} /> {t('confirm')}</button>
+            <button className="btn ghost" onClick={() => onDecide(a.id, 'reject')}>{t('reject')}</button>
           </div>
         ) : (
           <div className="ticket-result">
-            <span className={`stamp ${a.status}`}>{STAMPS[a.status] || a.status}</span>
+            <span className={`stamp ${a.status}`}>{t(`st_${a.status}`) === `st_${a.status}` ? a.status : t(`st_${a.status}`)}</span>
             {a.result?.reason && <p className="ticket-note">{a.result.reason}</p>}
           </div>
         )}

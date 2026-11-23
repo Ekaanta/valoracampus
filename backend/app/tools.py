@@ -32,6 +32,7 @@ class ToolContext:
     conversation_id: int | None = None
     user_message: str = ""
     turn_started_at: datetime = field(default_factory=utcnow)
+    language: str = "de"  # interface language: German or English summaries
     ui: list[dict] = field(default_factory=list)  # cards for the UI: charts, links, approvals
 
 
@@ -68,6 +69,7 @@ def call_tool(name: str, args: dict, ctx: ToolContext) -> dict:
     if not t:
         return {"error": f"Unknown tool '{name}'"}
     if t.sensitive:
+        args = {**args, "_lang": ctx.language}  # summary and later result in the user's language
         summary = t.summarize(args) if t.summarize else f"{name}({args})"
         with SessionLocal() as s:
             action = PendingAction(conversation_id=ctx.conversation_id, tool=name, args=args, summary=summary)
@@ -176,7 +178,7 @@ WEATHER_CODES = {0: "clear sky", 1: "mainly clear", 2: "partly cloudy", 3: "over
 def _weather(args: dict, ctx: ToolContext) -> dict:
     city = args.get("city") or settings.default_city
     geo = HTTP.get("https://geocoding-api.open-meteo.com/v1/search",
-                   params={"name": city, "count": 1, "language": settings.language}).json()
+                   params={"name": city, "count": 1, "language": ctx.language}).json()
     if not geo.get("results"):
         return {"error": f"City '{city}' not found"}
     place = geo["results"][0]
@@ -282,7 +284,13 @@ def _stock(args: dict, ctx: ToolContext) -> dict:
 
 
 def _trade_summary(a: dict) -> str:
-    return f"{a.get('side', 'buy').upper()} {a.get('coin', '?').upper()} for €{a.get('amount_eur')} (plus exchange fees)"
+    coin, amount = str(a.get("coin", "?")).upper(), a.get("amount_eur")
+    if a.get("_lang") == "en":
+        return f"{a.get('side', 'buy').upper()} {coin} for €{amount} (plus exchange fees)"
+    side = "VERKAUF" if a.get("side") == "sell" else "KAUF"
+    if isinstance(amount, (int, float)):  # German number format: 1.250,50
+        amount = f"{amount:,.2f}".replace(",", " ").replace(".", ",").replace(" ", ".")
+    return f"{side} {coin} für {amount} € (zzgl. Börsengebühren)"
 
 
 @tool("prepare_crypto_trade",
@@ -293,9 +301,13 @@ def _trade_summary(a: dict) -> str:
 def _trade(args: dict, ctx: ToolContext) -> dict:
     # Exchange execution is a later phase. Until an exchange API is connected this
     # honestly reports that nothing was bought or sold.
-    return {"executed": False,
-            "reason": "No exchange account is connected yet, so no order was placed. "
-                      "Connecting an exchange API (e.g. Kraken or Binance) is planned for a later phase."}
+    if args.get("_lang") == "en":
+        reason = ("No exchange account is connected yet, so no order was placed. "
+                  "Connecting an exchange API (e.g. Kraken or Binance) is planned for a later phase.")
+    else:
+        reason = ("Es ist noch kein Börsenkonto verbunden, daher wurde keine Order ausgeführt. "
+                  "Die Anbindung einer Börse (z. B. Kraken oder Binance) ist für eine spätere Phase geplant.")
+    return {"executed": False, "reason": reason}
 
 
 # ---------------------------------------------------------------------- web

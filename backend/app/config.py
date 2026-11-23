@@ -44,10 +44,18 @@ class Settings(BaseSettings):
 
     # --- persona ------------------------------------------------------------
     assistant_name: str = "SIMON"
-    language: str = "en"  # en | de  (speech recognition + default reply language)
+    language: str = "de"  # de | en: default language (the app can switch per device)
     timezone: str = "Europe/Berlin"
     default_city: str = "Berlin"
-    tts_voice: str = "en-GB-RyanNeural"  # any edge-tts voice, e.g. de-DE-ConradNeural
+    tts_voice_de: str = "de-DE-ConradNeural"  # native German voice (edge-tts)
+    tts_voice_en: str = "en-GB-RyanNeural"
+
+    def voice_for(self, lang: str | None) -> str:
+        return self.tts_voice_en if lang == "en" else self.tts_voice_de
+
+    def lang(self, lang: str | None) -> str:
+        """The requested language if supported, otherwise the default."""
+        return lang if lang in ("de", "en") else (self.language if self.language in ("de", "en") else "de")
 
     # --- AI providers, tried in this order (free first) ---------------------
     # 1) FreeLLMAPI: one OpenAI-compatible endpoint in front of many free providers (own server)

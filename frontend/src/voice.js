@@ -30,10 +30,10 @@ export function listen(lang, { onInterim } = {}) {
     })
     return { promise, stop: () => rec?.stop() }
   }
-  return recordAndTranscribe()
+  return recordAndTranscribe(lang)
 }
 
-function recordAndTranscribe() {
+function recordAndTranscribe(lang) {
   let recorder
   const promise = (async () => {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
@@ -45,7 +45,7 @@ function recordAndTranscribe() {
     setTimeout(() => recorder.state === 'recording' && recorder.stop(), 15000)
     await stopped
     stream.getTracks().forEach((t) => t.stop())
-    return transcribe(new Blob(chunks, { type: recorder.mimeType || 'audio/webm' }))
+    return transcribe(new Blob(chunks, { type: recorder.mimeType || 'audio/webm' }), lang?.slice(0, 2))
   })()
   return { promise, stop: () => recorder?.state === 'recording' && recorder.stop() }
 }
@@ -101,7 +101,7 @@ export async function speak(text, lang) {
   if (!clean) return
   try {
     if (!ctx) throw new Error('no audio context')
-    const data = await (await ttsAudio(clean)).arrayBuffer()
+    const data = await (await ttsAudio(clean, lang?.slice(0, 2))).arrayBuffer()
     const buffer = await ctx.decodeAudioData(data)
     await new Promise((resolve) => {
       source = ctx.createBufferSource()

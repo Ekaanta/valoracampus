@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { locale, t } from './i18n.js'
 
 const W = 640
 const H = 200
@@ -17,7 +18,7 @@ export default function Chart({ title, currency, points }) {
   const area = `${line} L${sx(x1)},${H} L${sx(x0)},${H} Z`
   const up = ys[ys.length - 1] >= ys[0]
   const change = (ys[ys.length - 1] / ys[0] - 1) * 100
-  const fmt = (v) => v.toLocaleString(undefined, { maximumFractionDigits: v < 10 ? 4 : 2 })
+  const fmt = (v) => v.toLocaleString(locale(), { maximumFractionDigits: v < 10 ? 4 : 2 })
   const shown = hover ?? points[points.length - 1]
   const [name, ...rest] = (title || '').split(' · ')
 
@@ -42,7 +43,7 @@ export default function Chart({ title, currency, points }) {
       </figcaption>
       <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" onMouseMove={move} onTouchMove={move}
            onMouseLeave={() => setHover(null)} onTouchEnd={() => setHover(null)} role="img"
-           aria-label={`${name} price chart, ${up ? 'up' : 'down'} ${Math.abs(change).toFixed(1)} percent`}>
+           aria-label={t('chartAria', { name, dir: up ? t('up') : t('down'), p: Math.abs(change).toFixed(1) })}>
         <defs>
           <linearGradient id="chartfill" x1="0" x2="0" y1="0" y2="1">
             <stop offset="0" stopColor="var(--accent)" stopOpacity=".18" />
@@ -55,7 +56,7 @@ export default function Chart({ title, currency, points }) {
         {hover && <line x1={sx(hover[0])} x2={sx(hover[0])} y1="0" y2={H} className="cursor" />}
       </svg>
       <div className="chart-foot">
-        <span>{new Date(shown[0]).toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</span>
+        <span>{new Date(shown[0]).toLocaleString(locale(), { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</span>
         <span>L {fmt(y0)} · H {fmt(y1)}</span>
       </div>
     </figure>

@@ -1,17 +1,18 @@
 // Dashboard widgets shared by the side wings (desktop) and the full views (phone and tablet).
 import Icon from './icons.jsx'
+import { locale, plural, t } from './i18n.js'
 
 export const CATS = ['profile', 'preference', 'project', 'decision', 'task', 'other']
 
 export const pad = (n, w = 2) => String(n ?? 0).padStart(w, '0')
-const num = (n) => (n == null ? '—' : Number(n).toLocaleString())
+const num = (n) => (n == null ? '—' : Number(n).toLocaleString(locale()))
 
 export function relDate(iso) {
   const d = new Date(iso)
   const days = Math.floor((Date.now() - d) / 86400000)
-  if (days < 1) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-  if (days < 7) return d.toLocaleDateString([], { weekday: 'short' })
-  return d.toLocaleDateString([], { day: 'numeric', month: 'short' })
+  if (days < 1) return d.toLocaleTimeString(locale(), { hour: '2-digit', minute: '2-digit' })
+  if (days < 7) return d.toLocaleDateString(locale(), { weekday: 'short' })
+  return d.toLocaleDateString(locale(), { day: 'numeric', month: 'short' })
 }
 
 /** A framed dashboard panel with a spaced, monospaced title row. */
@@ -23,7 +24,7 @@ export function Panel({ title, meta, onOpen, className = '', children }) {
         <span className="grow" />
         {meta != null && <span className="hud-meta">{meta}</span>}
         {onOpen && (
-          <button className="hud-open" onClick={onOpen} aria-label={`Open ${title}`} title="Open">
+          <button className="hud-open" onClick={onOpen} aria-label={`${t('open')}: ${title}`} title={t('open')}>
             <Icon name="expand" size={14} />
           </button>
         )}
@@ -57,15 +58,15 @@ export function Telemetry({ stats }) {
   return (
     <div className="telemetry">
       <div className="gauges">
-        <Gauge value={free} display={`${free}%`} label="Free" tone="ok" />
-        <Gauge value={s.reliability ?? 100} display={`${s.reliability ?? 100}%`} label="Reliable" />
-        <Gauge value={s.memories || 0} max={Math.max(50, s.memories || 0)} display={num(s.memories)} label="Memories" tone="hi" />
+        <Gauge value={free} display={`${free}%`} label={t('gFree')} tone="ok" />
+        <Gauge value={s.reliability ?? 100} display={`${s.reliability ?? 100}%`} label={t('gReliable')} />
+        <Gauge value={s.memories || 0} max={Math.max(50, s.memories || 0)} display={num(s.memories)} label={t('gMemory')} tone="hi" />
       </div>
       <dl className="readout">
-        <div><dt>Questions</dt><dd>{num(s.questions)}</dd></div>
-        <div><dt>Tools run</dt><dd>{num(s.tools_run)}</dd></div>
-        <div><dt>Switches</dt><dd>{num(s.switches)}</dd></div>
-        <div><dt>Paid calls</dt><dd className={s.paid_answers ? 'amber' : ''}>{num(s.paid_answers)}</dd></div>
+        <div><dt>{t('rQuestions')}</dt><dd>{num(s.questions)}</dd></div>
+        <div><dt>{t('rTools')}</dt><dd>{num(s.tools_run)}</dd></div>
+        <div><dt>{t('rSwitches')}</dt><dd>{num(s.switches)}</dd></div>
+        <div><dt>{t('rPaid')}</dt><dd className={s.paid_answers ? 'amber' : ''}>{num(s.paid_answers)}</dd></div>
       </dl>
     </div>
   )
@@ -73,7 +74,7 @@ export function Telemetry({ stats }) {
 
 /* ------------------------------------------------------------------ AI providers */
 export function ProviderList({ providers, stats, detailed = false }) {
-  if (!providers.length) return <p className="hud-empty">No AI provider is configured yet.</p>
+  if (!providers.length) return <p className="hud-empty">{t('noProvider')}</p>
   return (
     <ol className="pcards">
       {providers.map((p, i) => {
@@ -89,12 +90,12 @@ export function ProviderList({ providers, stats, detailed = false }) {
             </div>
             <div className="pcard-model">{p.model}</div>
             <div className="pcard-tags">
-              <span className={`chip ${p.paid ? 'amber' : 'ok'}`}>{p.paid ? 'Paid · asks first' : 'Free'}</span>
-              <span className={`chip ${active ? 'live' : state}`}>{active ? 'Active' : state}</span>
+              <span className={`chip ${p.paid ? 'amber' : 'ok'}`}>{p.paid ? t('pPaid') : t('pFree')}</span>
+              <span className={`chip ${active ? 'live' : state}`}>{active ? t('pActive') : t(state)}</span>
             </div>
             <div className="meter"><i style={{ width: `${Math.max(2, share * 100)}%` }} /></div>
             <div className="pcard-foot">
-              <span>{answers} {answers === 1 ? 'answer' : 'answers'}</span>
+              <span>{plural('answer', answers)}</span>
               <span>{Math.round(share * 100)}%</span>
             </div>
             {detailed && p.cooling_down && p.last_error && <p className="pcard-err">{p.last_error}</p>}
@@ -127,7 +128,7 @@ export function Brain({ memories, onPick }) {
     })
   })
   return (
-    <svg className="brain" viewBox={`0 0 ${W} ${H}`} role="img" aria-label={`${memories.length} memories grouped by category`}>
+    <svg className="brain" viewBox={`0 0 ${W} ${H}`} role="img" aria-label={plural('mem', memories.length)}>
       {hubs.map((h) => <line key={h.c} x1={cx} y1={cy} x2={h.x} y2={h.y} className="b-spoke" />)}
       {nodes.map(({ m, h, x, y }) => <line key={`l${m.id}`} x1={h.x} y1={h.y} x2={x} y2={y} className="b-link" />)}
       {nodes.map(({ m, x, y, j }) => (
@@ -139,31 +140,40 @@ export function Brain({ memories, onPick }) {
       {hubs.map((h) => (
         <g key={`h${h.c}`} className={`b-hub cat-${h.c}`}>
           <circle cx={h.x} cy={h.y} r="4.5" />
-          <text x={h.x} y={h.y - 9} textAnchor="middle">{h.c}</text>
+          <text x={h.x} y={h.y - 9} textAnchor="middle">{t(`cat_${h.c}`)}</text>
         </g>
       ))}
       <circle cx={cx} cy={cy} r="9" className="b-core-halo" />
       <circle cx={cx} cy={cy} r="4.5" className="b-core" />
-      {!memories.length && <text x={cx} y={cy + 26} textAnchor="middle" className="b-empty">Nothing learned yet</text>}
+      {!memories.length && <text x={cx} y={cy + 26} textAnchor="middle" className="b-empty">{t('nothingLearned')}</text>}
     </svg>
   )
 }
 
 /* ------------------------------------------------------------------ activity feed */
-export const KIND_LABELS = {
-  tool: 'tool', memory: 'memory', llm_failover: 'switch', llm_error: 'error', approval_requested: 'approval',
-  approval_executed: 'confirmed', approval_rejected: 'rejected', paid_approval_needed: 'paid?', memory_error: 'error',
+/** The server logs in English; show the common entries in the interface language. */
+export function activityText(a) {
+  if (a.kind === 'tool') return t(`t_${a.summary}`) === `t_${a.summary}` ? a.summary : t(`t_${a.summary}`)
+  if (a.kind === 'memory') {
+    const n = /(\d+)/.exec(a.summary)
+    return n ? t('learned', { n: n[1] }) : a.summary
+  }
+  if (a.kind === 'llm_failover') {
+    const m = /^(.+?) failed/.exec(a.summary)
+    return m ? t('failover', { name: m[1] }) : a.summary
+  }
+  return a.summary.replace(/^(Confirmed|Rejected): /, '')
 }
 
 export function Feed({ items, limit = 30 }) {
-  if (!items.length) return <p className="hud-empty">No activity yet.</p>
+  if (!items.length) return <p className="hud-empty">{t('noActivity')}</p>
   return (
     <ol className="feed">
       {items.slice(0, limit).map((a) => (
         <li key={a.id} className={`k-${a.kind}`}>
-          <time>{new Date(a.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}</time>
-          <span className="kind">{KIND_LABELS[a.kind] || a.kind}</span>
-          <span className="feed-text">{a.summary}</span>
+          <time>{new Date(a.at).toLocaleTimeString(locale(), { hour: '2-digit', minute: '2-digit', hour12: false })}</time>
+          <span className="kind">{t(`k_${a.kind}`) === `k_${a.kind}` ? a.kind : t(`k_${a.kind}`)}</span>
+          <span className="feed-text">{activityText(a)}</span>
         </li>
       ))}
     </ol>
@@ -172,7 +182,7 @@ export function Feed({ items, limit = 30 }) {
 
 /* ------------------------------------------------------------------ sessions */
 export function Sessions({ convs, convId, onOpen, onDelete }) {
-  if (!convs.length) return <p className="hud-empty">Your conversations will appear here.</p>
+  if (!convs.length) return <p className="hud-empty">{t('noSessions')}</p>
   return (
     <ul className="sessions">
       {convs.map((c) => (
@@ -182,7 +192,7 @@ export function Sessions({ convs, convId, onOpen, onDelete }) {
             <span className="session-date">{relDate(c.updated_at)}</span>
           </button>
           {onDelete && (
-            <button className="icon-btn danger" onClick={() => onDelete(c)} aria-label={`Delete ${c.title}`} title="Delete">
+            <button className="icon-btn danger" onClick={() => onDelete(c)} aria-label={`${t('delete')}: ${c.title}`} title={t('delete')}>
               <Icon name="trash" size={16} />
             </button>
           )}

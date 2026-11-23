@@ -60,15 +60,16 @@ export async function streamChat(body, onEvent, signal) {
   }
 }
 
-export async function ttsAudio(text) {
-  const res = await check(await fetch('/api/tts', { method: 'POST', headers: headers(), body: JSON.stringify({ text }) }))
+export async function ttsAudio(text, lang) {
+  const res = await check(await fetch('/api/tts', { method: 'POST', headers: headers(), body: JSON.stringify({ text, lang }) }))
   return res.blob()
 }
 
-export async function transcribe(blob) {
+export async function transcribe(blob, lang) {
   const form = new FormData()
   const ext = blob.type.includes('mp4') ? 'mp4' : blob.type.includes('ogg') ? 'ogg' : blob.type.includes('wav') ? 'wav' : 'webm'
   form.append('file', blob, `speech.${ext}`) // iPhones record mp4, Chrome/Firefox webm or ogg
+  if (lang) form.append('language', lang)
   const res = await check(await fetch('/api/stt', { method: 'POST', headers: { Authorization: `Bearer ${getToken() || ''}` }, body: form }))
   return (await res.json()).text
 }

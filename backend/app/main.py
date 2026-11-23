@@ -11,7 +11,7 @@ from pathlib import Path
 
 import edge_tts
 import jwt
-from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -120,6 +120,7 @@ class ChatIn(BaseModel):
     message: str | None = None
     conversation_id: int | None = None
     allow_paid: bool = False  # True only after the user approved the paid provider in the UI
+    language: str | None = None  # "de" | "en": interface language of the device
 
 
 def _sse(events):
@@ -133,7 +134,7 @@ def chat(body: ChatIn):
 
     def events():
         yield {"type": "conversation", "id": conv_id}
-        yield from run_turn(conv_id, body.message, allow_paid=body.allow_paid)
+        yield from run_turn(conv_id, body.message, allow_paid=body.allow_paid, language=body.language)
 
     return StreamingResponse(_sse(events()), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
@@ -330,26 +331,28 @@ def reminder_done(rem_id: int):
 class TTSIn(BaseModel):
     text: str
     voice: str | None = None
+    lang: str | None = None  # picks a native voice: German text needs a German voice (no English accent)
 
 
 @app.post("/api/tts", dependencies=[Depends(auth)])
 async def tts(body: TTSIn):
     audio = bytearray()
-    async for chunk in edge_tts.Communicate(body.text[:4000], body.voice or settings.tts_voice).stream():
+    async for chunk in edge_tts.Communicate(body.text[:4000], body.voice or settings.voice_for(settings.lang(body.lang))).stream():
         if chunk["type"] == "audio":
             audio.extend(chunk["data"])
     return Response(bytes(audio), media_type="audio/mpeg")
 
 
 @app.post("/api/stt", dependencies=[Depends(auth)])
-async def stt(file: UploadFile = File(...)):
+async def stt(file: UploadFile = File(...), language: str | None = Form(None)):
     """Fallback speech-to-text for browsers without built-in recognition (FreeLLMAPI or Groq Whisper)."""
     client = router.stt_client()
     if not client:
         raise HTTPException(503, "Speech-to-text needs FreeLLMAPI or a Groq key")
     data = await file.read()
     result = await asyncio.to_thread(client.audio.transcriptions.create, model=settings.stt_model,
-                                     file=(file.filename or "audio.webm", data))
+                                     file=(file.filename or "audio.webm", data),
+                                     language=settings.lang(language))
     return {"text": result.text}
 
 

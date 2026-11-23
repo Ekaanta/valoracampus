@@ -21,9 +21,8 @@ SYSTEM = """You are {name}, the personal AI assistant of your user, in the spiri
 calm, competent, warm, a little witty, always loyal and honest.
 
 Now: {now} ({tz}). User's home city: {city}.
-Reply in the language the user speaks (default: {lang}). Answers are often read aloud, so keep
-them natural and concise; avoid tables and long lists unless asked. Address the user by name if
-you know it.
+{lang_rule} Answers are often read aloud, so keep them natural and concise; avoid tables
+and long lists unless asked. Address the user by name if you know it.
 
 What you remember about the user:
 {memories}
@@ -38,14 +37,29 @@ Rules:
 - Explain risks when talking about investments; you are not a licensed financial advisor."""
 
 
-def _system_prompt() -> str:
+LANG_RULES = {
+    "de": ("Always answer in natural, fluent German (Hochdeutsch) as a native speaker would, even when "
+           "tool results or memories are in English. Address the user formally with 'Sie' unless they "
+           "ask for 'du'. Write numbers, dates and prices the German way (1.234,56 €; 24. Dezember; 14:30 Uhr)."),
+    "en": "Answer in English unless the user writes in another language.",
+}
+
+TEXT = {
+    "de": {"trying": "Denke mit {name} nach…", "failover": "{name} ist ausgelastet, wechsle zum nächsten KI-Anbieter…",
+           "none": "Gerade ist kein KI-Anbieter erreichbar. ({err})", "broken": "Die Antwort wurde unterbrochen: {err}"},
+    "en": {"trying": "Thinking with {name}…", "failover": "{name} is busy, switching to the next AI provider…",
+           "none": "No AI provider is reachable right now. ({err})", "broken": "The answer was interrupted: {err}"},
+}
+
+
+def _system_prompt(lang: str) -> str:
     tz = ZoneInfo(settings.timezone)
     with SessionLocal() as s:
         pending = s.scalars(select(PendingAction).where(PendingAction.status == "pending")
                             .order_by(PendingAction.id.desc()).limit(5)).all()
     pending_txt = "; ".join(f"#{p.id} {p.summary}" for p in pending) or "none"
     return SYSTEM.format(name=settings.assistant_name, now=datetime.now(tz).strftime("%A %d %B %Y, %H:%M"),
-                         tz=settings.timezone, city=settings.default_city, lang=settings.language,
+                         tz=settings.timezone, city=settings.default_city, lang_rule=LANG_RULES[lang],
                          memories=memory.memory_block(), pending=pending_txt)
 
 
@@ -77,8 +91,11 @@ def save_message(conversation_id: int, role: str, content: str, **extra) -> int:
         return msg.id
 
 
-def run_turn(conversation_id: int, user_text: str | None, allow_paid: bool = False) -> Iterator[dict]:
+def run_turn(conversation_id: int, user_text: str | None, allow_paid: bool = False,
+             language: str | None = None) -> Iterator[dict]:
     """Streams UI events: provider, token, tool, chart/link/approval cards, paid_required, error, done."""
+    lang = settings.lang(language)
+    say = TEXT[lang]
     turn_started = utcnow()
     if user_text is not None:
         save_message(conversation_id, "user", user_text)
@@ -88,8 +105,9 @@ def run_turn(conversation_id: int, user_text: str | None, allow_paid: bool = Fal
                                                    Message.role == "user").order_by(Message.id.desc())).first()
         user_text = last.content if last else ""
 
-    messages = [{"role": "system", "content": _system_prompt()}] + _history(conversation_id)
-    ctx = ToolContext(conversation_id=conversation_id, user_message=user_text, turn_started_at=turn_started)
+    messages = [{"role": "system", "content": _system_prompt(lang)}] + _history(conversation_id)
+    ctx = ToolContext(conversation_id=conversation_id, user_message=user_text, turn_started_at=turn_started,
+                      language=lang)
     answer, cards, provider = "", [], None
 
     try:
@@ -98,10 +116,10 @@ def run_turn(conversation_id: int, user_text: str | None, allow_paid: bool = Fal
             calls: dict[int, dict] = {}
             for kind, item in router.stream(messages, tools=schemas(), allow_paid=allow_paid):
                 if kind == "trying":
-                    yield {"type": "status", "text": f"Thinking with {item.name}…"}
+                    yield {"type": "status", "text": say["trying"].format(name=item.name)}
                     continue
                 if kind == "failover":
-                    yield {"type": "status", "text": f"{item.name} is busy, switching to the next AI provider…"}
+                    yield {"type": "status", "text": say["failover"].format(name=item.name)}
                     continue
                 if kind == "provider":
                     provider = item
@@ -154,11 +172,11 @@ def run_turn(conversation_id: int, user_text: str | None, allow_paid: bool = Fal
         return
     except AllProvidersFailed as err:
         log_activity("llm_error", str(err))
-        yield {"type": "error", "message": f"No AI provider is reachable right now. ({err})"}
+        yield {"type": "error", "message": say["none"].format(err=err)}
         return
     except Exception as err:  # e.g. a stream that broke after the answer had started
         log_activity("llm_error", f"{type(err).__name__}: {err}")
-        yield {"type": "error", "message": f"The answer was interrupted: {type(err).__name__}"}
+        yield {"type": "error", "message": say["broken"].format(err=type(err).__name__)}
         if not answer.strip():
             return
 
@@ -172,6 +190,6 @@ def run_turn(conversation_id: int, user_text: str | None, allow_paid: bool = Fal
     # would be frozen on serverless hosts.) The UI already finished at "done".
     if answer:
         try:
-            memory.extract_and_store(user_text, answer)
+            memory.extract_and_store(user_text, answer, lang)
         except Exception as err:
             log_activity("memory_error", f"{type(err).__name__}: {err}")

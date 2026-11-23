@@ -93,13 +93,22 @@ def _parse_json(text: str) -> dict:
         return {}
 
 
-def extract_and_store(user_text: str, assistant_text: str) -> None:
+GERMAN = """
+
+IMPORTANT: The user speaks German. Write every fact in German, starting with "Nutzer" (not "User").
+Example
+USER: Ich heiße Jonas, wohne in Hamburg und trinke Kaffee ohne Zucker.
+JSON: {"facts": [{"content": "Nutzer heißt Jonas", "category": "profile", "replaces": null}, {"content": "Nutzer wohnt in Hamburg", "category": "profile", "replaces": null}, {"content": "Nutzer trinkt Kaffee ohne Zucker", "category": "preference", "replaces": null}]}"""
+
+
+def extract_and_store(user_text: str, assistant_text: str, lang: str = "en") -> None:
     from .llm import router  # local import avoids a cycle
 
     existing = "\n".join(f"{m.id}: {m.content}" for m in recent_memories(120)) or "(none)"
     prompt = EXTRACT_PROMPT.format(existing=existing, user=user_text[:3000], assistant=assistant_text[:2000])
     try:
-        resp, _ = router.complete([{"role": "system", "content": EXTRACT_SYSTEM},
+        system = EXTRACT_SYSTEM + (GERMAN if lang == "de" else "")
+        resp, _ = router.complete([{"role": "system", "content": system},
                                    {"role": "user", "content": prompt}], temperature=0)
     except Exception:
         return  # memory extraction never uses paid providers and never breaks the chat
