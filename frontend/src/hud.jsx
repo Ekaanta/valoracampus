@@ -162,6 +162,7 @@ export function activityText(a) {
     const m = /^(.+?) failed/.exec(a.summary)
     return m ? t('failover', { name: m[1] }) : a.summary
   }
+  if (a.kind === 'llm_error') return /429|rate limit/i.test(a.summary) ? t('limitHit') : t('aiDown')
   return a.summary.replace(/^(Confirmed|Rejected): /, '')
 }
 

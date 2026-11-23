@@ -46,9 +46,15 @@ LANG_RULES = {
 
 TEXT = {
     "de": {"trying": "Denke mit {name} nach…", "failover": "{name} ist ausgelastet, wechsle zum nächsten KI-Anbieter…",
-           "none": "Gerade ist kein KI-Anbieter erreichbar. ({err})", "broken": "Die Antwort wurde unterbrochen: {err}"},
+           "waiting": "Kurze Pause: das kostenlose Limit ist erreicht, ich versuche es in {s} Sekunden erneut…",
+           "limit": "Das kostenlose Limit ist gerade erreicht. Bitte versuchen Sie es in {s} Sekunden noch einmal.",
+           "none": "Gerade ist kein KI-Anbieter erreichbar. Bitte versuchen Sie es gleich noch einmal.",
+           "broken": "Die Antwort wurde unterbrochen. Bitte versuchen Sie es noch einmal."},
     "en": {"trying": "Thinking with {name}…", "failover": "{name} is busy, switching to the next AI provider…",
-           "none": "No AI provider is reachable right now. ({err})", "broken": "The answer was interrupted: {err}"},
+           "waiting": "Short pause: the free limit is reached, trying again in {s} seconds…",
+           "limit": "The free usage limit is reached for the moment. Please try again in {s} seconds.",
+           "none": "No AI provider is reachable right now. Please try again in a moment.",
+           "broken": "The answer was interrupted. Please try again."},
 }
 
 
@@ -121,6 +127,9 @@ def run_turn(conversation_id: int, user_text: str | None, allow_paid: bool = Fal
                 if kind == "failover":
                     yield {"type": "status", "text": say["failover"].format(name=item.name)}
                     continue
+                if kind == "waiting":
+                    yield {"type": "status", "text": say["waiting"].format(s=round(item[1]) + 1)}
+                    continue
                 if kind == "provider":
                     provider = item
                     yield {"type": "provider", "name": item.name, "model": item.model, "paid": item.paid}
@@ -162,7 +171,7 @@ def run_turn(conversation_id: int, user_text: str | None, allow_paid: bool = Fal
                     yield card
                 yield {"type": "tool", "name": name, "status": "error" if "error" in result else "done"}
                 messages.append({"role": "tool", "tool_call_id": tc["id"],
-                                 "content": json.dumps(result, ensure_ascii=False, default=str)[:8000]})
+                                 "content": json.dumps(result, ensure_ascii=False, default=str)[:5000]})
             if answer and not answer.endswith((" ", "\n")):
                 answer += "\n\n"
                 yield {"type": "token", "text": "\n\n"}
@@ -171,12 +180,16 @@ def run_turn(conversation_id: int, user_text: str | None, allow_paid: bool = Fal
         yield {"type": "paid_required", **need.to_dict()}
         return
     except AllProvidersFailed as err:
-        log_activity("llm_error", str(err))
-        yield {"type": "error", "message": say["none"].format(err=err)}
+        log_activity("llm_error", str(err))  # the technical details stay in the activity log
+        if err.retry_after is not None:
+            wait = max(1, round(err.retry_after) + 1)
+            yield {"type": "error", "message": say["limit"].format(s=wait), "retry_after": wait, "retryable": True}
+        else:
+            yield {"type": "error", "message": say["none"], "retry_after": 0, "retryable": True}
         return
     except Exception as err:  # e.g. a stream that broke after the answer had started
         log_activity("llm_error", f"{type(err).__name__}: {err}")
-        yield {"type": "error", "message": say["broken"].format(err=type(err).__name__)}
+        yield {"type": "error", "message": say["broken"], "retry_after": 0, "retryable": True}
         if not answer.strip():
             return
 

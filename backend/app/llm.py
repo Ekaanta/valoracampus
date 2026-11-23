@@ -8,16 +8,18 @@ Every failover is written to the activity log.
 """
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Iterator
 
-from openai import OpenAI
+from openai import OpenAI, RateLimitError
 
 from .config import settings
 from .db import log_activity
 
 COOLDOWN_SECONDS = 60
+MAX_WAIT = 12  # a rate limit that resets within this many seconds is waited out once instead of failing
 
 
 @dataclass
@@ -65,7 +67,25 @@ class PaidApprovalRequired(Exception):
 
 
 class AllProvidersFailed(Exception):
-    pass
+    def __init__(self, message: str, retry_after: float | None = None):
+        super().__init__(message)
+        self.retry_after = retry_after  # set when every provider was only rate-limited
+
+
+def _retry_after(err: Exception) -> float | None:
+    """Seconds until a rate limit resets (from the header or "try again in 8.36s"); None if not a rate limit."""
+    if not (isinstance(err, RateLimitError) or getattr(err, "status_code", None) == 429):
+        return None
+    try:
+        header = err.response.headers.get("retry-after")
+        if header:
+            return float(header)
+    except Exception:
+        pass
+    m = re.search(r"try again in (?:(\d+)m)?([\d.]+)(ms|s)", str(err))
+    if m:
+        return int(m.group(1) or 0) * 60 + float(m.group(2)) / (1000 if m.group(3) == "ms" else 1)
+    return 30.0
 
 
 def _short(err: Exception) -> str:
@@ -82,6 +102,8 @@ class LLMRouter:
                                       settings.freellmapi_key, settings.freellmapi_model, timeout=50))
         direct = [
             ("Groq", "https://api.groq.com/openai/v1", settings.groq_api_key, settings.groq_model),
+            ("Groq backup", "https://api.groq.com/openai/v1", settings.groq_api_key,
+             settings.groq_backup_model if settings.groq_backup_model != settings.groq_model else ""),
             ("Google Gemini", "https://generativelanguage.googleapis.com/v1beta/openai/",
              settings.gemini_api_key, settings.gemini_model),
             ("OpenRouter", "https://openrouter.ai/api/v1", settings.openrouter_api_key, settings.openrouter_model),
@@ -113,17 +135,20 @@ class LLMRouter:
         p.last_ok_at = time.time()
         p.cooldown_until = 0
 
-    def _fail(self, p: Provider, err: Exception) -> None:
+    def _fail(self, p: Provider, err: Exception, wait: float | None = None) -> None:
         p.fail_count += 1
         p.last_error = _short(err)
-        p.cooldown_until = time.time() + COOLDOWN_SECONDS
+        # a rate-limited provider is ready again as soon as its limit resets
+        p.cooldown_until = time.time() + (wait if wait is not None else COOLDOWN_SECONDS)
         log_activity("llm_failover", f"{p.name} failed, switching provider", {"error": p.last_error})
 
-    def _exhausted(self, errors: list[str], allow_paid: bool):
+    def _exhausted(self, errors: list[str], allow_paid: bool, limited: list | None = None):
         if self.paid and not allow_paid:
             raise PaidApprovalRequired(self.paid, "All free AI providers are unavailable right now: "
                                        + " | ".join(errors))
-        raise AllProvidersFailed(" | ".join(errors) or "No AI provider is configured")
+        only_limits = bool(limited) and len(limited) == len(errors)
+        raise AllProvidersFailed(" | ".join(errors) or "No AI provider is configured",
+                                 retry_after=min(w for w, _ in limited) if only_limits else None)
 
     def _args(self, p: Provider, messages: list[dict], tools: list | None, **kw: Any) -> dict:
         args = {"model": p.model, "messages": messages, **kw}
@@ -134,15 +159,19 @@ class LLMRouter:
     # -- public API ----------------------------------------------------------
     def complete(self, messages: list[dict], tools: list | None = None, allow_paid: bool = False, **kw: Any):
         errors: list[str] = []
+        limited: list[tuple[float, Provider]] = []
         for p in self._candidates(allow_paid):
             try:
                 resp = p.client().chat.completions.create(**self._args(p, messages, tools, **kw))
                 self._ok(p)
                 return resp, p
             except Exception as err:  # network error, 429, 5xx, unsupported tools ...
-                self._fail(p, err)
+                wait = _retry_after(err)
+                self._fail(p, err, wait)
                 errors.append(f"{p.name}: {_short(err)}")
-        self._exhausted(errors, allow_paid)
+                if wait is not None:
+                    limited.append((wait, p))
+        self._exhausted(errors, allow_paid, limited)
 
     def stream(self, messages: list[dict], tools: list | None = None, allow_paid: bool = False) -> Iterator[tuple[str, Any]]:
         """Yields ("trying", Provider) and ("failover", Provider) progress items,
@@ -152,29 +181,46 @@ class LLMRouter:
         answer is already reaching the user.
         """
         errors: list[str] = []
+        limited: list[tuple[float, Provider]] = []
         for p in self._candidates(allow_paid):
             yield "trying", p
-            try:
-                stream = p.client().chat.completions.create(**self._args(p, messages, tools, stream=True))
-                iterator = iter(stream)
-                first = next(iterator)
-            except StopIteration:
-                self._fail(p, RuntimeError("empty response"))
-                errors.append(f"{p.name}: empty response")
-                yield "failover", p
-                continue
-            except Exception as err:
-                self._fail(p, err)
-                errors.append(f"{p.name}: {_short(err)}")
-                yield "failover", p
-                continue
-            self._ok(p)
-            yield "provider", p
-            yield "chunk", first
-            for chunk in iterator:
-                yield "chunk", chunk
-            return
-        self._exhausted(errors, allow_paid)
+            if (yield from self._stream_one(p, messages, tools, errors, limited)):
+                return
+        # Every provider failed. If the only problem was a short rate limit, wait it out once.
+        if limited and len(limited) == len(errors):
+            wait, p = min(limited, key=lambda x: x[0])
+            if wait <= MAX_WAIT:
+                yield "waiting", (p, wait)
+                time.sleep(wait + 0.5)
+                if (yield from self._stream_one(p, messages, tools, errors, limited)):
+                    return
+        self._exhausted(errors, allow_paid, limited)
+
+    def _stream_one(self, p: Provider, messages, tools, errors: list, limited: list):
+        """Streams one provider; returns True when it answered, False after recording the failure."""
+        try:
+            stream = p.client().chat.completions.create(**self._args(p, messages, tools, stream=True))
+            iterator = iter(stream)
+            first = next(iterator)
+        except StopIteration:
+            self._fail(p, RuntimeError("empty response"))
+            errors.append(f"{p.name}: empty response")
+            yield "failover", p
+            return False
+        except Exception as err:
+            wait = _retry_after(err)
+            self._fail(p, err, wait)
+            errors.append(f"{p.name}: {_short(err)}")
+            if wait is not None:
+                limited.append((wait, p))
+            yield "failover", p
+            return False
+        self._ok(p)
+        yield "provider", p
+        yield "chunk", first
+        for chunk in iterator:
+            yield "chunk", chunk
+        return True
 
     def stt_client(self) -> OpenAI | None:
         """Speech-to-text goes through FreeLLMAPI if present, otherwise straight to Groq Whisper."""

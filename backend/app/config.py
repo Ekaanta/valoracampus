@@ -65,6 +65,7 @@ class Settings(BaseSettings):
     # 2) Direct free tiers, used where FreeLLMAPI cannot run (e.g. Vercel)
     groq_api_key: str = ""
     groq_model: str = "openai/gpt-oss-120b"
+    groq_backup_model: str = "openai/gpt-oss-20b"  # own rate limit; "" turns it off
     gemini_api_key: str = ""
     gemini_model: str = "gemini-flash-latest"
     openrouter_api_key: str = ""

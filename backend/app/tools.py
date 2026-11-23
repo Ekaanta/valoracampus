@@ -352,7 +352,7 @@ def _read_webpage(args: dict, ctx: ToolContext) -> dict:
     html = HTTP.get(url).text
     html = re.sub(r"(?is)<(script|style|noscript|svg)[^>]*>.*?</\1>", " ", html)
     text = re.sub(r"\s+", " ", re.sub(r"(?s)<[^>]+>", " ", html)).strip()
-    return {"url": url, "text": text[:6000], "truncated": len(text) > 6000}
+    return {"url": url, "text": text[:4000], "truncated": len(text) > 4000}
 
 
 @tool("show_route", "Show a route / directions on Google Maps.",

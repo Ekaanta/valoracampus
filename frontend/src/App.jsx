@@ -337,11 +337,11 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew }) {
         else if (ev.type === 'tool') patchLast((m) => ({ ...m, tools: [...m.tools.filter((x) => x.name !== ev.name), ev] }))
         else if (['chart', 'link', 'approval'].includes(ev.type)) patchLast((m) => ({ ...m, cards: [...(m.cards || []), ev] }))
         else if (ev.type === 'paid_required') patchLast((m) => ({ ...m, paid: ev }))
-        else if (ev.type === 'error') patchLast((m) => ({ ...m, error: ev.message }))
+        else if (ev.type === 'error') patchLast((m) => ({ ...m, error: ev.message, retryable: !!ev.retryable, retryAfter: ev.retry_after || 0 }))
         else if (ev.type === 'done') finish() // the server keeps learning memories after this
       })
     } catch (x) {
-      patchLast((m) => ({ ...m, error: x.message }))
+      patchLast((m) => ({ ...m, error: x.message, retryable: true, retryAfter: 0 }))
     }
     finish()
   }
@@ -369,6 +369,13 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew }) {
     if (orb === 'speaking') { stopSpeaking(); setOrb('idle'); return }
     if (listener.current) { listener.current.stop(); return }
     if (!busy) startListening()
+  }
+
+  // Ask the last question again: the failed answer is replaced, the server re-uses the saved question.
+  const retry = () => {
+    if (busy) return
+    setMessages((ms) => ms.slice(0, -1))
+    send(null)
   }
 
   const speakAgain = async (text) => {
@@ -485,7 +492,13 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew }) {
                       </div>
                     </div>
                   )}
-                  {m.error && <p className="msg-error">{m.error}</p>}
+                  {m.error && (
+                    <div className="msg-error" role="alert">
+                      <Icon name="warn" size={16} />
+                      <p className="grow">{m.error}</p>
+                      {m.retryable && i === messages.length - 1 && !busy && <RetryButton seconds={m.retryAfter} onRetry={retry} />}
+                    </div>
+                  )}
                   {!m.content && !m.error && !m.paid && busy && i === messages.length - 1 && (
                     <p className="thinking">{m.status || t('thinking')}<span className="dots"><i /><i /><i /></span></p>
                   )}
@@ -517,6 +530,21 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew }) {
         </div>
       </form>
     </div>
+  )
+}
+
+/** "Try again" — counts down first while a free usage limit resets. */
+function RetryButton({ seconds, onRetry }) {
+  const [left, setLeft] = useState(Math.ceil(seconds || 0))
+  useEffect(() => {
+    if (left <= 0) return undefined
+    const timer = setTimeout(() => setLeft((s) => s - 1), 1000)
+    return () => clearTimeout(timer)
+  }, [left])
+  return (
+    <button className="btn small" onClick={onRetry} disabled={left > 0}>
+      <Icon name="history" size={14} /> {left > 0 ? t('retryIn', { s: left }) : t('retry')}
+    </button>
   )
 }
 
