@@ -13,6 +13,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Iterator
 
+import httpx
 from openai import OpenAI, RateLimitError
 
 from .config import settings
@@ -31,6 +32,8 @@ class Provider:
     paid: bool = False
     cost_note: str = ""
     timeout: float = 90  # seconds to wait for the first byte before failing over
+    keyless: bool = False  # the provider rejects any Authorization header (OVH anonymous tier)
+    light: bool = False  # a small model: used first for background work such as memory extraction
     ok_count: int = 0
     fail_count: int = 0
     last_error: str = ""
@@ -40,8 +43,12 @@ class Provider:
 
     def client(self) -> OpenAI:
         if self._client is None:
+            extra = {}
+            if self.keyless:  # send no key at all: a dummy key is refused with 403
+                extra["http_client"] = httpx.Client(timeout=self.timeout, event_hooks={
+                    "request": [lambda request: request.headers.pop("Authorization", None)]})
             self._client = OpenAI(base_url=self.base_url, api_key=self.api_key or "none",
-                                  timeout=self.timeout, max_retries=0)
+                                  timeout=self.timeout, max_retries=0, **extra)
         return self._client
 
     def status(self) -> dict:
@@ -100,17 +107,25 @@ class LLMRouter:
             # if it still has nothing by then, SIMON moves on to the local model.
             self.free.append(Provider("FreeLLMAPI", settings.freellmapi_url,
                                       settings.freellmapi_key, settings.freellmapi_model, timeout=50))
-        direct = [
+        cf_url = f"https://api.cloudflare.com/client/v4/accounts/{settings.cloudflare_account_id}/ai/v1"
+        direct = [  # genuinely free tiers only (see docs/AI_PROVIDERS.md)
             ("Groq", "https://api.groq.com/openai/v1", settings.groq_api_key, settings.groq_model),
             ("Groq backup", "https://api.groq.com/openai/v1", settings.groq_api_key,
              settings.groq_backup_model if settings.groq_backup_model != settings.groq_model else ""),
+            ("Cloudflare", cf_url, settings.cloudflare_api_token if settings.cloudflare_account_id else "",
+             settings.cloudflare_model),
+            ("Z.ai", "https://api.z.ai/api/paas/v4", settings.zai_api_key, settings.zai_model),
             ("Google Gemini", "https://generativelanguage.googleapis.com/v1beta/openai/",
              settings.gemini_api_key, settings.gemini_model),
             ("OpenRouter", "https://openrouter.ai/api/v1", settings.openrouter_api_key, settings.openrouter_model),
         ]
         for name, url, key, model in direct:
             if key and model:
-                self.free.append(Provider(name, url, key, model, timeout=45))
+                self.free.append(Provider(name, url, key, model, timeout=45, light=name == "Groq backup"))
+        ovh_models = [m.strip() for m in settings.ovh_model.split(",") if m.strip()] if settings.ovh_url else []
+        for i, model in enumerate(ovh_models):  # keyless: works without any account
+            self.free.append(Provider("OVHcloud (EU)" + (f" {i + 1}" if i else ""), settings.ovh_url, "", model,
+                                      timeout=45, keyless=True, light=model.endswith("-20b")))
         if settings.ollama_model:
             self.free.append(Provider("Ollama (local)", settings.ollama_url, "ollama", settings.ollama_model,
                                       timeout=240))
@@ -121,10 +136,11 @@ class LLMRouter:
                                  cost_note=settings.paid_cost_note)
 
     # -- helpers -------------------------------------------------------------
-    def _candidates(self, allow_paid: bool) -> list[Provider]:
+    def _candidates(self, allow_paid: bool, light: bool = False) -> list[Provider]:
         now = time.time()
-        ready = [p for p in self.free if p.cooldown_until <= now]
-        cooling = [p for p in self.free if p.cooldown_until > now]
+        free = sorted(self.free, key=lambda p: not p.light) if light else self.free
+        ready = [p for p in free if p.cooldown_until <= now]
+        cooling = [p for p in free if p.cooldown_until > now]
         order = ready + cooling  # cooling providers are still tried as a last free resort
         if allow_paid and self.paid:
             order.append(self.paid)
@@ -157,10 +173,12 @@ class LLMRouter:
         return args
 
     # -- public API ----------------------------------------------------------
-    def complete(self, messages: list[dict], tools: list | None = None, allow_paid: bool = False, **kw: Any):
+    def complete(self, messages: list[dict], tools: list | None = None, allow_paid: bool = False,
+                 light: bool = False, **kw: Any):
+        """light=True: small models first (background work), so the main model keeps its free quota."""
         errors: list[str] = []
         limited: list[tuple[float, Provider]] = []
-        for p in self._candidates(allow_paid):
+        for p in self._candidates(allow_paid, light):
             try:
                 resp = p.client().chat.completions.create(**self._args(p, messages, tools, **kw))
                 self._ok(p)

@@ -74,6 +74,14 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-flash-latest"
     openrouter_api_key: str = ""
     openrouter_model: str = ""  # e.g. a ":free" model id from openrouter.ai/models
+    cloudflare_account_id: str = ""  # Cloudflare Workers AI: free 10,000 neurons per day
+    cloudflare_api_token: str = ""
+    cloudflare_model: str = "@cf/openai/gpt-oss-120b"
+    zai_api_key: str = ""  # Z.ai: free GLM Flash models
+    zai_model: str = "glm-4.7-flash"
+    # OVHcloud AI Endpoints (EU): free without any key, but only about 2 requests per minute per model
+    ovh_url: str = "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1"
+    ovh_model: str = "gpt-oss-120b,gpt-oss-20b"  # comma list, each model has its own limit; "" = off
     # 3) Ollama: local models on the server (leave empty where no Ollama runs)
     ollama_url: str = "http://127.0.0.1:11434/v1"
     ollama_model: str = ""

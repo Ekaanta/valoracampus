@@ -344,7 +344,7 @@ async def tts(body: TTSIn):
     """German and English: Fish Audio (free model), streamed as raw PCM so playback starts at once.
     Whenever Fish is not usable: the standard voice (edge-tts) as one MP3."""
     lang = settings.lang(body.lang)
-    text = body.text[:4000]
+    text = fish.pronounce(body.text[:4000], lang)
     choice = fish.pick(lang, body.voice_key)
     speed = fish.speed_of(body.speed)
     if not body.voice and choice["fish"] and fish.fish_enabled(lang):

@@ -108,7 +108,7 @@ def extract_and_store(user_text: str, assistant_text: str, lang: str = "en") -> 
     prompt = EXTRACT_PROMPT.format(existing=existing, user=user_text[:3000], assistant=assistant_text[:2000])
     try:
         system = EXTRACT_SYSTEM + (GERMAN if lang == "de" else "")
-        resp, _ = router.complete([{"role": "system", "content": system},
+        resp, _ = router.complete(light=True, messages=[{"role": "system", "content": system},
                                    {"role": "user", "content": prompt}], temperature=0)
     except Exception:
         return  # memory extraction never uses paid providers and never breaks the chat

@@ -15,7 +15,8 @@ from .llm import AllProvidersFailed, PaidApprovalRequired, router
 from .tools import ToolContext, call_tool, schemas
 
 MAX_STEPS = 6
-HISTORY = 20
+HISTORY = 10  # messages of the conversation sent with each request (fewer tokens = fewer limits)
+OLD_MESSAGE_CHARS = 1200  # long earlier answers are shortened in that history
 
 SYSTEM = """You are {name}, the personal AI assistant of your user, in the spirit of J.A.R.V.I.S.:
 calm, competent, warm, a little witty, always loyal and honest.
@@ -80,7 +81,14 @@ def _history(conversation_id: int) -> list[dict]:
     with SessionLocal() as s:
         rows = s.scalars(select(Message).where(Message.conversation_id == conversation_id)
                          .order_by(Message.id.desc()).limit(HISTORY)).all()
-    return [{"role": m.role, "content": m.content or "…"} for m in reversed(rows)]
+    rows = list(reversed(rows))
+    out = []
+    for i, m in enumerate(rows):
+        text = m.content or "…"
+        if i < len(rows) - 1 and len(text) > OLD_MESSAGE_CHARS:
+            text = text[:OLD_MESSAGE_CHARS] + " …"
+        out.append({"role": m.role, "content": text})
+    return out
 
 
 def ensure_conversation(conversation_id: int | None, first_text: str) -> int:

@@ -9,6 +9,7 @@ Cost protection (the client's rules):
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 
 import httpx
@@ -59,6 +60,16 @@ def catalogue() -> dict:
     out = {lang: [{"key": v["key"], "name": v["name"], "fish": bool(v["fish"])} for v in voices
                   if fish_ok or not v["fish"]] for lang, voices in VOICES.items()}
     return {**out, "speeds": list(SPEEDS), "default_speed": DEFAULT_SPEED}
+
+
+# German voices read "Simon" the German way; it is an English name. Spelled as it should sound:
+PRONOUNCE = {"de": [(re.compile(r"\b(?:SIMON|Simon)(s?)\b"), r"Saimen\1")]}
+
+
+def pronounce(text: str, lang: str) -> str:
+    for pattern, spoken in PRONOUNCE.get(lang, []):
+        text = pattern.sub(spoken, text)
+    return text
 
 
 def fish_enabled(lang: str) -> bool:

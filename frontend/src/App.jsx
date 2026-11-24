@@ -273,6 +273,9 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew, voices }) 
   const [busy, setBusy] = useState(false)
   const [interim, setInterim] = useState('')
   const [handsFree, setHandsFree] = useState(false)
+  // voice: the sphere stays large and only the current words show below it; text: the full chat
+  const [mode, setModeState] = useState(() => { try { return localStorage.getItem('simon_mode') || 'voice' } catch { return 'voice' } })
+  const setMode = (m) => { setModeState(m); try { localStorage.setItem('simon_mode', m) } catch { /* private mode */ } }
   const [spoken, setSpoken] = useState('') // subtitle under the sphere while Simon speaks
   const turnRef = useRef(0) // the latest send/replay; older ones must not reset the state
   const skipLoad = useRef(false)
@@ -368,6 +371,7 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew, voices }) 
     unlockAudio()
     setOrb('listening')
     setInterim('')
+    setMode('voice')
     try {
       listener.current = listen(speechLang(), { onInterim: setInterim })
       const text = await listener.current.promise
@@ -421,6 +425,7 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew, voices }) 
     const text = input.trim()
     if (!text || busy) return
     setInput('')
+    setMode('text')
     send(text)
   }
 
@@ -429,13 +434,14 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew, voices }) 
   }
 
   const empty = messages.length === 0
+  const voiceMode = !empty && mode === 'voice'
   const hint = t(`h_${orb}`)
   const lastAi = [...messages].reverse().find((m) => m.role === 'assistant')
   const subtitle = orb === 'speaking' && spoken ? spoken.replace(/[*_#>`]/g, '').replace(/\s+/g, ' ').trim() : ''
   const caption = interim || subtitle || (orb === 'thinking' ? (lastAi?.status || t('thinking')) : null)
 
   return (
-    <div className={empty ? 'core welcome' : 'core live'}>
+    <div className={empty || voiceMode ? 'core welcome' : 'core live'}>
       <div className="core-body">
         <section className="reactor-stage" aria-label="Simon">
           <button className="reactor-frame" onClick={micClick} aria-label={hint} title={hint}>
@@ -448,6 +454,12 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew, voices }) 
                 {STATES.map((s) => <span key={s} className={s === orb ? `on ${s}` : ''}>{t(`s_${s}`)}</span>)}
               </div>
               {!empty && (
+                <button className="new-session" onClick={() => setMode(voiceMode ? 'text' : 'voice')}
+                        title={voiceMode ? t('toText') : t('toVoice')}>
+                  <Icon name={voiceMode ? 'chat' : 'core'} size={13} /> {voiceMode ? t('modeText') : t('modeVoice')}
+                </button>
+              )}
+              {!empty && (
                 <button className="new-session" onClick={onNew} title={t('startNew')}><Icon name="plus" size={13} /> {t('new')}</button>
               )}
             </div>
@@ -456,6 +468,9 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew, voices }) 
                 <h1 className="welcome-title">{greeting()}. <span>{t('online2')}</span></h1>
                 <p className="welcome-sub">{t('welcomeSub', { hint })}</p>
               </>
+            ) : voiceMode ? (
+              <VoiceStrip messages={messages} orb={orb} interim={interim} spoken={subtitle} hint={hint}
+                          onOpenText={() => setMode('text')} />
             ) : (
               <p className="caption" aria-live="polite">{caption || hint}</p>
             )}
@@ -463,7 +478,7 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew, voices }) 
         </section>
 
         <div className="scroll">
-          {empty ? (
+          {voiceMode ? null : empty ? (
             <div className="suggestions">
               {SUGGESTIONS.map(([tag, q]) => (
                 <button key={q} onClick={() => send(t(q))}><span className="sugg-tag">{t(tag)}</span>{t(q)}</button>
@@ -551,6 +566,38 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew, voices }) 
           <span className="hint">{t('enterHint')}</span>
         </div>
       </form>
+    </div>
+  )
+}
+
+const speakable = (text) => (text || '').replace(/\|/g, ' ').replace(/[*_#>`]/g, '').replace(/\s+/g, ' ').trim()
+
+/**
+ * Voice mode: under the large sphere only the current exchange — your last words and what Simon
+ * is saying right now (or the end of his last answer). Charts and confirmations open text mode.
+ */
+function VoiceStrip({ messages, orb, interim, spoken, hint, onOpenText }) {
+  const lastUser = [...messages].reverse().find((m) => m.role === 'user')
+  const lastAi = [...messages].reverse().find((m) => m.role === 'assistant')
+  let simon = ''
+  if (orb === 'speaking' && spoken) simon = spoken
+  else if (orb === 'thinking') simon = lastAi?.status || t('thinking')
+  else if (lastAi?.error) simon = lastAi.error
+  else if (lastAi?.content) {
+    const all = speakable(lastAi.content)
+    simon = all.length > 220 ? `… ${all.slice(-220).replace(/^\S*\s/, '')}` : all
+  }
+  const pending = lastAi?.cards?.some((c) => c.type === 'approval' && c.action?.status === 'pending')
+  const hasCard = pending || lastAi?.cards?.length > 0
+  return (
+    <div className="voice-strip" aria-live="polite">
+      {(interim || lastUser) && <p className={interim ? 'vs-user live' : 'vs-user'}>{interim || lastUser.content}</p>}
+      <p className="vs-simon">{simon || hint}</p>
+      {hasCard && (
+        <button className={pending ? 'vs-card pending' : 'vs-card'} onClick={onOpenText}>
+          <Icon name={pending ? 'warn' : 'expand'} size={13} /> {pending ? t('approvalInText') : t('cardInText')}
+        </button>
+      )}
     </div>
   )
 }
