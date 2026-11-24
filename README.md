@@ -29,9 +29,10 @@ One responsive web app (installable as an app) for iPhone, Android, tablets, Win
 
 ## What works in this version
 
-- Text and voice conversation (speak → SIMON answers aloud → listens again in Voice mode)
-- Real-time interruption: talk over SIMON while he speaks and he stops, listens and answers what you
-  said, knowing how much of his answer you heard (tapping the orb also stops him)
+- Real-time voice conversation: one tap and the microphone stays open; SIMON answers aloud and listens
+  again by himself. A short pause does not cut your sentence; if you go on while he is thinking, he waits
+  and joins both parts. Talk over him and he stops at once and answers what you said, knowing how much of
+  his answer you heard. Another tap ends the conversation.
 - Persistent memory, synced across devices (everything is stored on the server)
 - Free-first routing FreeLLMAPI → Ollama → paid-with-approval, failover + activity log
 - Tools: weather & forecast, crypto price + chart + simple analysis (RSI/trend), stock charts, web search,

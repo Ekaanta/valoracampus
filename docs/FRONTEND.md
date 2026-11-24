@@ -22,7 +22,7 @@ checked without it.
 | The sphere (size, number of nodes and lines, glitter, rays, rotation speed, light pulses) | `frontend/src/Sphere.jsx` | the `SPHERE` block at the top; every value has a comment |
 | The sphere's colours | `frontend/src/Sphere.jsx` | `SPHERE.dark` and `SPHERE.light` (RGB values) |
 | How strongly the sphere reacts to the voice | `frontend/src/voice.js` | `voiceLevel()` (your formula: bins 4–64, ×2.4, threshold 0.06, max 0.7) |
-| When talking over Simon counts as an interruption | `frontend/src/voice.js` | the `BARGE_IN` block (how long and how loud the user must speak, how long a pause ends the sentence) |
+| How the conversation microphone reacts | `frontend/src/voice.js` | the `MIC` block (how loud and how long you must speak, how long a pause ends your turn, when the conversation closes) |
 | Interface colours (background, panels, accent) | `frontend/src/styles.css` | the colour tokens at the top: `:root` = light theme, `:root[data-theme="dark"]` = dark theme |
 | Any text, in German or English | `frontend/src/i18n.js` | `DE` and `EN` lists; the key on the left must stay the same |
 | Start in German or English | `frontend/src/i18n.js` | the line `return 'de'` near the top |
@@ -45,19 +45,29 @@ checked without it.
 The value that drives it is `target` (0 to 0.7), read from Simon's real voice through the Web
 Audio analyser in `voice.js`, exactly as described in your sphere specification.
 
-## Interrupting Simon (barge-in)
+## Talking with Simon (conversation mode)
 
-While Simon speaks, the microphone stays open (with the browser's echo cancellation). When you talk over
-him for about a quarter of a second, he stops at once, records what you say until a short pause, and
-answers it. He is told how much of his previous answer you heard, so he does not repeat it and can carry
-on from there ("go on", "and the price?"). The switch **Unterbrechen / Interrupt** under the input turns it
-off; tapping the sphere still stops him at any time.
+One tap on the sphere starts a conversation and the microphone stays open, like a phone call, until
+the next tap (or two minutes in which nobody talks). You simply talk; there is nothing to tap between
+questions:
 
-If a device stops Simon by itself (his own voice comes back through the microphone) or does not react
-to you, tune it there: open the browser console and run `localStorage.simon_barge_debug = '1'`, reload,
-let Simon speak, then look at `window.__bargeLog` (`mic` = your level, `threshold` = what is needed,
-`simon` = his loudness). Raise `minLevel` or `overEcho` in `BARGE_IN` if he stops by himself, lower them
-if he does not hear you. Headphones avoid the echo completely.
+- **Simon is silent:** he notices within a fraction of a second that you talk and listens. A short
+  breath in the middle of a sentence does not end it; about 1.3 seconds of quiet does.
+- **You paused and went on:** if you continue while Simon is still thinking, or has only just begun
+  to answer, he stops and waits for the rest; both parts become one question, which replaces the half one.
+- **You talk over his answer:** he stops at once and answers what you said. He is told how much of his
+  previous answer you heard, so he does not repeat it and can carry on from there ("go on").
+  The switch **Unterbrechen / Interrupt** under the input turns this off.
+
+What you say is written out on the server (Whisper, via FreeLLMAPI or Groq). The microphone uses the
+browser's echo cancellation; what is left of Simon's own voice is measured against his current
+loudness, so it does not count as you talking. Headphones avoid the echo completely.
+
+To tune it for a device (all values are in the `MIC` block in `frontend/src/voice.js`): open the browser
+console, run `localStorage.simon_mic_debug = '1'`, reload, have a short conversation, then look at
+`window.__micLog` (`mic` = your level, `threshold` = what is needed, `simon` = his loudness). Raise
+`minLevel` or `overEcho` if Simon stops by himself, lower them if he does not notice you; raise
+`endSilenceMs` if he still answers before you have finished.
 
 ## Publishing a change
 

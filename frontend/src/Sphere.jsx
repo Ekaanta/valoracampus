@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { voiceLevel } from './voice.js'
+import { micLevel, voiceLevel } from './voice.js'
 
 /* =============================================================================
  * SIMON'S SPHERE: the client's "Jarvis sphere", running on Simon's real voice.
@@ -184,7 +184,8 @@ export default function Sphere({ state = 'idle' }) {
         const v = voiceLevel()
         target = v ?? fakeSyllables(T)
       }
-      const rest = st === 'listening' ? 0.12 + 0.05 * Math.sin(T * 3) : 0.05 + 0.03 * Math.sin(T * 1.6)
+      // while listening it also moves with the user's own voice
+      const rest = st === 'listening' ? 0.12 + 0.05 * Math.sin(T * 3) + Math.min(0.4, micLevel() * 4) : 0.05 + 0.03 * Math.sin(T * 1.6)
       vis += ((speaking ? 1 : 0) - vis) * 0.05
       sm += ((speaking ? target : rest) - sm) * 0.5
       amp += (sm - amp) * 0.3

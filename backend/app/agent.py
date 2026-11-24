@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Iterator
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 
 from . import memory, store
 from .config import settings
@@ -96,6 +96,31 @@ def _close_interrupted(conversation_id: int, heard: str) -> None:
         save_message(conversation_id, "assistant", f"{text} …" if text else "…", meta={"interrupted": True})
 
 
+def _replace_last_turn(conversation_id: int, question: str) -> None:
+    """The user had only paused: their last question (and any answer to it) is replaced by the full one."""
+    with SessionLocal() as s:
+        last = s.scalars(select(Message).where(Message.conversation_id == conversation_id, Message.role == "user")
+                         .order_by(Message.id.desc())).first()
+        if not last:
+            return
+        s.execute(delete(Message).where(Message.conversation_id == conversation_id, Message.id >= last.id))
+        left = s.scalar(select(func.count()).select_from(Message).where(Message.conversation_id == conversation_id))
+        conv = s.get(Conversation, conversation_id)
+        if conv and not left:  # it was the first question: the title shows the full one
+            conv.title = question.strip()[:60] or conv.title
+        s.commit()
+
+
+def _superseded(conversation_id: int, question_id: int | None) -> bool:
+    """True when the user has moved on (cut in or completed the question): this answer must not be saved."""
+    if question_id is None:
+        return False
+    with SessionLocal() as s:
+        newest = s.scalar(select(func.max(Message.id)).where(Message.conversation_id == conversation_id))
+        still_there = s.get(Message, question_id) is not None
+    return not still_there or newest != question_id
+
+
 def _system_prompt(lang: str, spoken: bool = False, user_id: int | None = None, user_name: str = "the user",
                    username: str = "") -> str:
     cfg = store.get_settings()  # what the administrator set in the app
@@ -152,23 +177,28 @@ def save_message(conversation_id: int, role: str, content: str, **extra) -> int:
 
 def run_turn(conversation_id: int, user_text: str | None, allow_paid: bool = False,
              language: str | None = None, spoken: bool = False, user_id: int | None = None,
-             user_name: str = "the user", username: str = "", interrupted: str | None = None) -> Iterator[dict]:
+             user_name: str = "the user", username: str = "", interrupted: str | None = None,
+             replace_last: bool = False) -> Iterator[dict]:
     """Streams UI events: provider, token, tool, chart/link/approval cards, paid_required, error, done.
 
     interrupted: the user talked over the previous spoken answer; this is the part of it they heard.
+    replace_last: the user had only paused; this question completes their last one and replaces it.
     """
     lang = settings.lang(language)
     say = TEXT[lang]
     turn_started = utcnow()
     if user_text is not None:
+        if replace_last:
+            _replace_last_turn(conversation_id, user_text)
         if interrupted is not None:
             _close_interrupted(conversation_id, interrupted)
-        save_message(conversation_id, "user", user_text)
+        question_id = save_message(conversation_id, "user", user_text)
     else:  # retry of the last user message (e.g. after approving a paid provider)
         with SessionLocal() as s:
             last = s.scalars(select(Message).where(Message.conversation_id == conversation_id,
                                                    Message.role == "user").order_by(Message.id.desc())).first()
         user_text = last.content if last else ""
+        question_id = last.id if last else None
 
     system = _system_prompt(lang, spoken, user_id, user_name, username) + _interrupted_note(interrupted)
     messages = [{"role": "system", "content": system}] + _history(conversation_id)
@@ -254,6 +284,8 @@ def run_turn(conversation_id: int, user_text: str | None, allow_paid: bool = Fal
             return
 
     answer = answer.strip()
+    if _superseded(conversation_id, question_id):
+        return  # the user cut in while this was being written (the app stopped listening to it)
     msg_id = save_message(conversation_id, "assistant", answer,
                           provider=provider.name if provider else None,
                           model=provider.model if provider else None,

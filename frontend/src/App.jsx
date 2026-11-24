@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, getToken, login, setupAdmin, signUp, streamChat, transcribe } from './api.js'
 import {
-  bargeInSupported, createBargeIn, createSpeaker, listen, realSpeech, setVoicePrefs, speak, stopSpeaking, unlockAudio, voicePrefs,
+  MIC, createSpeaker, listen, micSupported, openMic, realSpeech, setVoicePrefs, speak, stopSpeaking, unlockAudio, voicePrefs,
 } from './voice.js'
 import { AccountPanel, ActivityPanel, AdminPanel, HistoryPanel, MemoryPanel, SystemsPanel } from './panels.jsx'
 import { Brain, Feed, Panel, ProviderList, Sessions, Telemetry } from './hud.jsx'
@@ -346,22 +346,22 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew, voices, me
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
   const [interim, setInterim] = useState('')
-  const [handsFree, setHandsFree] = useState(false)
-  // talking over Simon stops him and he answers what was said (needs the microphone while he speaks)
+  // A conversation (one tap on the sphere): the microphone stays open, like a phone call, until the next tap
+  const [talk, setTalk] = useState(false)
+  const talkRef = useRef(false)
+  // talking over Simon stops him and he answers what was said
   const [bargeIn, setBargeInState] = useState(() => voicePrefs().bargeIn !== false)
-  const setBargeIn = (on) => { setBargeInState(on); setVoicePrefs({ bargeIn: on }); if (!on) stopWatching() }
+  const setBargeIn = (on) => { setBargeInState(on); setVoicePrefs({ bargeIn: on }) }
   // voice: the sphere stays large and only the current words show below it; text: the full chat
   const [mode, setModeState] = useState(() => { try { return localStorage.getItem('simon_mode') || 'voice' } catch { return 'voice' } })
   const setMode = (m) => { setModeState(m); try { localStorage.setItem('simon_mode', m) } catch { /* private mode */ } }
   const [spoken, setSpoken] = useState('') // subtitle under the sphere while Simon speaks
   const turnRef = useRef(0) // the latest send/replay; older ones must not reset the state
   const skipLoad = useRef(false)
-  const listener = useRef(null)
+  const listener = useRef(null) // one-time listening (browsers without the conversation microphone)
   const bottom = useRef(null)
   const textarea = useRef(null)
-  const handsFreeRef = useRef(handsFree)
-  handsFreeRef.current = handsFree
-  const convRef = useRef(convId) // the hands-free loop calls send() from older renders
+  const convRef = useRef(convId) // callbacks from older renders call send()
   convRef.current = convId
   const busyRef = useRef(false) // callbacks from older renders must see the current value
   const markBusy = (on) => { busyRef.current = on; setBusy(on) }
@@ -369,8 +369,12 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew, voices, me
   bargeInRef.current = bargeIn
   const abortRef = useRef(null) // stops the answer while it is still being written
   const heardRef = useRef('') // what Simon has already said aloud of the current answer
-  const watcher = useRef(null) // the microphone watch while Simon speaks
-  const stopWatching = () => { watcher.current?.close(); watcher.current = null }
+  const mic = useRef(null) // the open conversation microphone
+  // the user's turn in a conversation: the pieces said so far and how they relate to Simon's last answer
+  const talkState = useRef({
+    parts: [], replaceLast: false, interrupted: null, lastQuestion: '', lastInterrupted: null,
+    speakingSince: 0, replay: false, chain: Promise.resolve(), idle: null,
+  })
 
   useEffect(() => {
     if (skipLoad.current) { skipLoad.current = false; return }
@@ -389,7 +393,8 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew, voices, me
 
   useEffect(() => () => {
     listener.current?.stop()
-    watcher.current?.close()
+    mic.current?.close()
+    clearTimeout(talkState.current.idle)
     abortRef.current?.abort()
     stopSpeaking()
     setOrb('idle')
@@ -401,21 +406,25 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew, voices, me
     return copy
   })
 
-  // spoken: the question came from the microphone, so the answer is spoken too (even without hands-free)
+  // spoken: the answer is read aloud (the question came by voice, or a conversation is open)
   // interrupted: the part of Simon's previous answer the user heard before talking over him
-  const send = async (text, { allowPaid = false, spoken = false, interrupted = null } = {}) => {
+  // replaceLast: the user had only paused; this question completes the previous one and replaces it
+  const send = async (text, { allowPaid = false, spoken = false, interrupted = null, replaceLast = false } = {}) => {
     if (busyRef.current) return
     unlockAudio()
     markBusy(true)
     setOrb('thinking')
-    stopWatching()
     stopSpeaking()
     const turn = ++turnRef.current
+    const ts = talkState.current
     heardRef.current = ''
+    ts.speakingSince = 0
+    ts.replay = false
+    if (text) ts.lastQuestion = text
     // Voice answers start with the first finished sentence, while the rest is still being written.
-    const speaker = spoken || handsFreeRef.current
+    const speaker = spoken || talkRef.current
       ? createSpeaker(speechLang(), {
-        onStart: () => { setOrb('speaking'); watchForInterruption(turn, speaker) },
+        onStart: () => { ts.speakingSince = performance.now(); setOrb('speaking') },
         onSentence: (s) => { heardRef.current += `${heardRef.current ? ' ' : ''}${s}`; setSpoken(s) },
       })
       : null
@@ -424,28 +433,27 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew, voices, me
     const now = new Date().toISOString()
     setMessages((ms) => [...ms, ...(text ? [{ role: 'user', content: text, created_at: now }] : []),
       { role: 'assistant', content: '', cards: [], tools: [], created_at: now }])
-    let reply = ''
     let finished = false
     const finish = async () => {
       if (finished) return
       finished = true
       if (abortRef.current === ctl) abortRef.current = null // after "done" the server still learns memories
-      if (turnRef.current === turn) markBusy(false) // (an interruption already did this itself)
+      if (turnRef.current === turn) markBusy(false) // (when the user cut in, that already happened)
       onChanged()
       if (speaker) {
         speaker.end()
         await speaker.done
-        if (turnRef.current !== turn) return // a newer question (or an interruption) took over
-        stopWatching()
-        setSpoken('')
-        if (!speaker.stopped && handsFreeRef.current && reply.trim()) return startListening()
+        if (turnRef.current === turn) setSpoken('')
       }
-      setOrb('idle')
+      if (turnRef.current !== turn) return // a newer question, or the user cutting in, took over
+      ts.speakingSince = 0
+      setOrb(talkRef.current ? 'listening' : 'idle') // in a conversation Simon simply listens again
+      armClose()
     }
     try {
       await streamChat({
         message: text, conversation_id: convRef.current, allow_paid: allowPaid, language: currentLang(),
-        spoken: !!speaker, ...(interrupted !== null ? { interrupted } : {}),
+        spoken: !!speaker, ...(interrupted !== null ? { interrupted } : {}), ...(replaceLast ? { replace_last: true } : {}),
       }, (ev) => {
         if (ev.type === 'conversation' && ev.id !== convRef.current) {
           skipLoad.current = true
@@ -454,7 +462,6 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew, voices, me
         } else if (ev.type === 'status') patchLast((m) => ({ ...m, status: ev.text }))
         else if (ev.type === 'provider') patchLast((m) => ({ ...m, provider: ev.name, model: ev.model }))
         else if (ev.type === 'token') {
-          reply += ev.text
           speaker?.push(ev.text)
           patchLast((m) => ({ ...m, status: null, content: m.content + ev.text }))
         }
@@ -470,59 +477,143 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew, voices, me
     finish()
   }
 
-  /* Barge-in: while Simon speaks the microphone listens. Talking over him stops him at once (and the
-     answer that is still being written); what the user then says is answered with the knowledge of
-     how much of the previous answer they heard. */
-  const watchForInterruption = async (turn, speaker) => {
-    if (!bargeInRef.current || !bargeInSupported()) return
-    stopWatching()
-    let heard = ''
-    const w = await createBargeIn({
-      onStart: () => {
-        if (turnRef.current !== turn) return
-        heard = heardRef.current
-        const own = ++turnRef.current // the interrupted answer must not change the state any more
-        w.turn = own
-        abortRef.current?.abort()
-        abortRef.current = null
-        markBusy(false)
-        stopSpeaking()
-        setSpoken('')
-        setOrb('listening')
-        setInterim(t('listeningPh'))
+  /* A real conversation: after one tap the microphone stays open. Whenever the user talks, Simon notices
+     it at once. While he is silent, he listens. While he is still thinking, or has only just begun to
+     answer, the user had not finished (they only paused): he stops, and what they say now is joined to
+     the question before. In the middle of an answer he stops and answers what was said, knowing how much
+     of his answer they heard. */
+  const armClose = () => { // the conversation ends by itself after a long time without anybody talking
+    const ts = talkState.current
+    clearTimeout(ts.idle)
+    if (!talkRef.current) return
+    ts.idle = setTimeout(() => {
+      if (!talkRef.current) return
+      if (busyRef.current || ts.speakingSince || mic.current?.talking || ts.parts.length) { armClose(); return }
+      endTalk()
+    }, MIC.closeAfterMs)
+  }
+
+  const startTalk = async () => {
+    if (talkRef.current) return
+    unlockAudio()
+    setMode('voice')
+    if (!micSupported()) return startListening()
+    talkRef.current = true
+    setTalk(true)
+    setInterim('')
+    if (!busyRef.current && !talkState.current.speakingSince) setOrb('listening')
+    const m = await openMic({ onSpeech: userStarts, onUtterance: userSaid })
+    if (!talkRef.current) { m?.close(); return } // ended meanwhile
+    if (!m) { // no microphone access: listen once the browser's way (it shows why)
+      talkRef.current = false
+      setTalk(false)
+      return startListening()
+    }
+    mic.current = m
+    armClose()
+  }
+
+  const endTalk = () => {
+    const ts = talkState.current
+    talkRef.current = false
+    setTalk(false)
+    mic.current?.close()
+    mic.current = null
+    clearTimeout(ts.idle)
+    ts.parts = []
+    ts.interrupted = null
+    ts.replaceLast = false
+    setInterim('')
+    if (!busyRef.current && !ts.speakingSince) setOrb('idle')
+  }
+
+  const dropLastExchange = (ms) => {
+    let i = ms.length
+    if (ms[i - 1]?.role === 'assistant') i--
+    if (ms[i - 1]?.role === 'user') i--
+    return ms.slice(0, i)
+  }
+
+  // The microphone noticed the user talking. Returning false ignores it.
+  const userStarts = () => {
+    const ts = talkState.current
+    clearTimeout(ts.idle)
+    if (ts.replay) { // a replayed answer: simply stop it
+      ++turnRef.current
+      stopSpeaking()
+      ts.replay = false
+      ts.speakingSince = 0
+      setSpoken('')
+    } else if (busyRef.current || ts.speakingSince) {
+      const continuing = !ts.speakingSince || performance.now() - ts.speakingSince < 2500
+      if (!continuing && !bargeInRef.current) return false // talking over Simon is switched off
+      ++turnRef.current // the answer that is cut off must not change the state any more
+      abortRef.current?.abort()
+      abortRef.current = null
+      markBusy(false)
+      stopSpeaking()
+      setSpoken('')
+      if (continuing) { // they had only paused: what comes now completes the last question
+        ts.parts = [ts.lastQuestion, ...ts.parts].filter(Boolean)
+        ts.replaceLast = true
+        ts.interrupted = ts.lastInterrupted
+        setMessages(dropLastExchange)
+      } else {
+        ts.interrupted = heardRef.current
+        ts.replaceLast = false
         setMessages((ms) => {
           const copy = [...ms]
           const i = copy.length - 1
           if (copy[i]?.role === 'assistant') copy[i] = { ...copy[i], interrupted: true, status: null }
           return copy
         })
-      },
-      onUtterance: (blob) => answerInterruption(w.turn, blob, heard),
-    })
-    if (!w) return
-    if (turnRef.current !== turn || speaker.finished) { w.close(); return } // he finished meanwhile
-    watcher.current = w
-  }
-
-  const answerInterruption = async (turn, blob, heard) => {
-    if (turnRef.current !== turn) return
-    watcher.current = null
-    setOrb('thinking')
-    setInterim('')
-    let text = null
-    try { text = ((await transcribe(blob, speechLang().slice(0, 2))) || '').trim() } catch { /* no speech-to-text */ }
-    if (turnRef.current !== turn) return // the user did something else meanwhile
-    if (text === null) return startListening() // the server cannot transcribe: listen the normal way
-    if (!realSpeech(text)) { // only a noise
-      if (handsFreeRef.current) return startListening()
-      setOrb('idle')
-      return
+      }
+      ts.speakingSince = 0
     }
-    send(text, { spoken: true, interrupted: heard })
+    setOrb('listening')
+    setInterim(t('listeningPh'))
+    return true
   }
 
+  // The user paused: write out what they said, and answer it once they have finished.
+  const userSaid = (wav, speechMs) => {
+    const ts = talkState.current
+    ts.chain = ts.chain.then(async () => {
+      if (!talkRef.current) return
+      let text = ''
+      let failed = false
+      if (speechMs >= MIC.minSpeechMs) { // shorter: a cough or a click
+        if (!mic.current?.talking) { setOrb('thinking'); setInterim('') }
+        try {
+          text = ((await transcribe(wav, speechLang().slice(0, 2))) || '').trim()
+        } catch (x) {
+          if (x.status === 503) { endTalk(); startListening(); return } // no speech-to-text on this server
+          failed = true
+        }
+      }
+      if (!talkRef.current) return
+      if (realSpeech(text)) ts.parts.push(text)
+      if (mic.current?.talking) return // they are talking again: wait for the rest
+      if (!ts.parts.length) { // only a noise (or not understood)
+        setInterim(failed ? t('notHeard') : '')
+        if (!busyRef.current && !ts.speakingSince) setOrb('listening')
+        armClose()
+        return
+      }
+      const question = ts.parts.join(' ')
+      const opts = { spoken: true, interrupted: ts.interrupted, replaceLast: ts.replaceLast }
+      ts.parts = []
+      ts.interrupted = null
+      ts.replaceLast = false
+      ts.lastInterrupted = opts.interrupted
+      setInterim('')
+      if (busyRef.current) { ++turnRef.current; abortRef.current?.abort(); abortRef.current = null; markBusy(false); stopSpeaking() }
+      send(question, opts)
+    })
+  }
+
+  // One question by voice, the browser's way (only where the conversation microphone is not available)
   const startListening = async () => {
-    stopWatching()
     stopSpeaking()
     unlockAudio()
     setOrb('listening')
@@ -543,10 +634,10 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew, voices, me
   }
 
   const micClick = () => {
-    if (watcher.current?.talking) { watcher.current.finish(); return } // the user talked over Simon: done
-    if (orb === 'speaking') { stopWatching(); stopSpeaking(); setOrb(busy ? 'thinking' : 'idle'); return }
+    if (talkRef.current) { endTalk(); stopSpeaking(); return } // tap again: the conversation ends
     if (listener.current) { listener.current.stop(); return }
-    if (!busy) startListening()
+    if (orb === 'speaking') { stopSpeaking(); setOrb(busy ? 'thinking' : 'idle'); return }
+    startTalk()
   }
 
   // Ask the last question again: the failed answer is replaced, the server re-uses the saved question.
@@ -559,13 +650,16 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew, voices, me
   const speakAgain = async (text) => {
     if (busy) return
     unlockAudio()
-    stopWatching()
     const turn = ++turnRef.current
+    const ts = talkState.current
+    ts.replay = true
     setOrb('thinking')
-    await speak(text, speechLang(), { onStart: () => setOrb('speaking'), onSentence: setSpoken })
+    await speak(text, speechLang(), { onStart: () => { ts.speakingSince = performance.now(); setOrb('speaking') }, onSentence: setSpoken })
     if (turnRef.current !== turn) return
+    ts.replay = false
+    ts.speakingSince = 0
     setSpoken('')
-    setOrb('idle')
+    setOrb(talkRef.current ? 'listening' : 'idle')
   }
 
   const decide = async (msgIndex, actionId, verdict) => {
@@ -709,19 +803,14 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew, voices, me
       <form className="composer" onSubmit={submit}>
         <div className={`composer-box ${orb}`}>
           <button type="button" className={`mic ${orb}`} onClick={micClick} aria-label={hint} title={hint}>
-            <Icon name={orb === 'listening' ? 'stop' : orb === 'speaking' ? 'speaker' : 'mic'} size={18} />
+            <Icon name={talk || orb === 'listening' ? 'stop' : orb === 'speaking' ? 'speaker' : 'mic'} size={18} />
           </button>
           <textarea ref={textarea} rows={1} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={onKey}
                     placeholder={orb === 'listening' ? t('listeningPh') : t('placeholder')} aria-label={t('message')} />
           <button className="send" disabled={busy || !input.trim()} aria-label={t('send')}><Icon name="arrowUp" size={18} /></button>
         </div>
         <div className="composer-meta">
-          <label className="switch">
-            <input type="checkbox" checked={handsFree} onChange={(e) => setHandsFree(e.target.checked)} />
-            <span className="track"><span className="thumb" /></span>
-            {t('handsFree')}
-          </label>
-          {bargeInSupported() && (
+          {micSupported() && (
             <label className="switch" title={t('bargeInHint')}>
               <input type="checkbox" checked={bargeIn} onChange={(e) => setBargeIn(e.target.checked)} />
               <span className="track"><span className="thumb" /></span>

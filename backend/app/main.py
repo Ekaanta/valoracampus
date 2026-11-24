@@ -164,6 +164,7 @@ class ChatIn(BaseModel):
     spoken: bool = False  # the answer will be read aloud: keep it short
     # The user talked over Simon's previous spoken answer: the part they heard before that ("" = nothing)
     interrupted: str | None = Field(None, max_length=8000)
+    replace_last: bool = False  # the user had only paused: this question completes (replaces) their last one
 
 
 def _sse(events):
@@ -179,7 +180,8 @@ def chat(body: ChatIn, user: User = Depends(current_user)):
         yield {"type": "conversation", "id": conv_id}
         yield from run_turn(conv_id, body.message, allow_paid=body.allow_paid, language=body.language,
                             spoken=body.spoken, user_id=user.id, user_name=user.display_name or user.username,
-                            username=user.username, interrupted=body.interrupted)
+                            username=user.username, interrupted=body.interrupted,
+                            replace_last=body.replace_last)
 
     return StreamingResponse(_sse(events()), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

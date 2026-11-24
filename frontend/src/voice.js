@@ -377,27 +377,36 @@ export function speak(text, lang, callbacks) {
   return speaker.done
 }
 
-/* ---------------------------------------------------------------- interrupting Simon (barge-in)
- * While Simon speaks, the microphone stays open. When the user talks over him, he stops at once and
- * the user's words are recorded until a short pause (with the moment before the detection, so the
- * first word is not lost), then written out on the server (Whisper) and answered.
+/* ---------------------------------------------------------------- the conversation microphone
+ * A real conversation: one tap opens the microphone and it stays open, like a phone call, until the
+ * next tap. Whenever the user talks, Simon notices it within a fraction of a second, also while he is
+ * thinking or speaking (then he stops at once). The user's words are recorded with the moment before
+ * the detection (so the first word is not lost) until a real pause, then written out on the server
+ * (Whisper). A short breath in the middle of a sentence does not end it.
  * The browser's echo cancellation removes most of Simon's own voice from the microphone. What is left
  * is compared with how loud Simon is right now, so his own voice does not count as the user talking.
- * The numbers below can be tuned without touching the logic (louder room: raise minLevel).
+ * The numbers below can be tuned without touching the logic (see docs/FRONTEND.md).
  */
-export const BARGE_IN = {
-  startMs: 260, // this much clear speech over Simon counts as an interruption
-  endSilenceMs: 800, // the user has finished after this much quiet
-  maxMs: 15000, // longest recording
+export const MIC = {
+  startMs: 200, // this much clear speech starts the user's turn while Simon is silent ...
+  startOverSimonMs: 280, // ... and while he speaks (a little longer: what is left of his echo must not do it)
+  endSilenceMs: 1300, // the user has finished after this much quiet
+  minSpeechMs: 350, // shorter sounds (a cough, a door) are not sent to speech recognition
+  maxMs: 30000, // longest single recording
   preRollMs: 500, // kept from just before the detection
-  warmupMs: 450, // the first moments only learn the room noise and the echo
+  warmupMs: 300, // the first moments after opening only learn the room noise
   minLevel: 0.012, // the quietest level (RMS, 0 to 1) that can count as speech
   overNoise: 3, // speech must be this many times louder than the room noise ...
   overEcho: 2.4, // ... and this many times louder than what is left of Simon's voice
+  closeAfterMs: 120000, // the conversation ends by itself after this long without anybody talking
 }
 
-export const bargeInSupported = () => typeof window !== 'undefined'
+export const micSupported = () => typeof window !== 'undefined'
   && !!(navigator.mediaDevices?.getUserMedia && (window.AudioContext || window.webkitAudioContext))
+
+let userLevel = 0
+/** How loud the user is talking right now (RMS, 0 to 1; the sphere moves with it), 0 while they are silent. */
+export const micLevel = () => userLevel
 
 let outBuf = null
 /** How loud Simon's voice leaves the speakers right now (RMS, 0 to 1). */
@@ -440,12 +449,14 @@ function toWav(frames, rate) {
 }
 
 /**
- * Watches the microphone while Simon speaks. onStart() fires the moment the user talks over him,
- * onUtterance(wavBlob) when they have finished. Resolves with { close(), finish(), talking },
- * or null when the microphone is not available (then Simon can still be stopped by tapping).
+ * Opens the microphone for a conversation. onSpeech() fires the moment the user starts talking (return
+ * false to ignore it, e.g. when talking over Simon is switched off); onUtterance(wav, speechMs) fires after
+ * the pause that ends what they said. Resolves with { close(), finish(), talking }, or null when there is
+ * no microphone (or the user did not allow it).
  */
-export async function createBargeIn({ onStart, onUtterance }) {
-  if (!ctx || !bargeInSupported()) return null
+export async function openMic({ onSpeech, onUtterance }) {
+  unlockAudio()
+  if (!ctx || !micSupported()) return null
   let stream
   try {
     stream = await navigator.mediaDevices.getUserMedia({
@@ -453,79 +464,84 @@ export async function createBargeIn({ onStart, onUtterance }) {
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false, channelCount: 1 },
     })
   } catch { return null }
-  const B = BARGE_IN
+  const M = MIC
   const rate = ctx.sampleRate
   const size = 2048
   const frameMs = (size / rate) * 1000
-  const mic = ctx.createMediaStreamSource(stream)
+  const source = ctx.createMediaStreamSource(stream)
   const proc = ctx.createScriptProcessor(size, 1, 1)
   const mute = ctx.createGain()
   mute.gain.value = 0 // the processor only runs when connected to the output; nothing is heard
-  mic.connect(proc)
+  source.connect(proc)
   proc.connect(mute)
   mute.connect(ctx.destination)
 
-  // For tuning on a real device: localStorage.simon_barge_debug = '1' keeps every measurement in window.__bargeLog
+  // For tuning on a real device: localStorage.simon_mic_debug = '1' keeps every measurement in window.__micLog
   let debug = false
-  try { debug = localStorage.getItem('simon_barge_debug') === '1' } catch { /* private mode */ }
-  if (debug) window.__bargeLog = []
+  try { debug = localStorage.getItem('simon_mic_debug') === '1' } catch { /* private mode */ }
+  if (debug) window.__micLog = []
   const opened = performance.now()
-  let state = 'watch' // watch -> talking -> done
+  let closed = false
+  let talking = false
   let floor = null // room noise
-  let echo = 0.25 // how much of Simon's voice reaches the microphone after echo cancellation
+  let echo = 0.25 // how much of Simon's voice reaches the microphone after echo cancellation (learned)
   let outHold = 0 // Simon's recent loudness (his echo arrives a little later than the sound leaves)
-  let run = 0 // consecutive frames of speech
-  let gaps = 0
+  const windowFrames = Math.max(4, Math.round(500 / frameMs))
+  const recent = [] // loud or not, for the last half second
   let quietMs = 0
-  let frames = [] // pre-roll while watching, the recording while talking
+  let speechMs = 0
+  let frames = [] // the pre-roll while waiting, the recording while the user talks
   let length = 0
 
   const close = () => {
-    if (state === 'done') return
-    state = 'done'
+    if (closed) return
+    closed = true
+    talking = false
+    userLevel = 0
     proc.onaudioprocess = null
-    try { mic.disconnect(); proc.disconnect(); mute.disconnect() } catch { /* already disconnected */ }
+    try { source.disconnect(); proc.disconnect(); mute.disconnect() } catch { /* already disconnected */ }
     stream.getTracks().forEach((tr) => tr.stop())
   }
   const finish = () => {
-    if (state !== 'talking') return
+    if (!talking) return
     const recorded = frames
-    close()
-    onUtterance?.(toWav(recorded, rate))
+    const said = speechMs
+    talking = false
+    userLevel = 0
+    frames = []
+    length = 0
+    onUtterance?.(toWav(recorded, rate), said)
   }
 
   proc.onaudioprocess = (e) => {
-    if (state === 'done') return
+    if (closed) return
     const x = new Float32Array(e.inputBuffer.getChannelData(0)) // a copy: the browser reuses the buffer
     let s = 0
     for (let i = 0; i < x.length; i++) s += x[i] * x[i]
     const r = Math.sqrt(s / x.length)
     frames.push(x)
     length += x.length
-
-    if (state === 'talking') {
-      const quiet = r < Math.max(B.minLevel * 0.8, floor * 2)
-      quietMs = quiet ? quietMs + frameMs : 0
-      if (quietMs >= B.endSilenceMs || (length / rate) * 1000 >= B.maxMs) finish()
-      return
-    }
-
-    // watching: keep only the last moments as pre-roll
-    const keep = Math.ceil((B.preRollMs / 1000) * rate)
-    while (length - frames[0].length >= keep) length -= frames.shift().length
     outHold = Math.max(outputLevel(), outHold * 0.8)
     if (floor === null) floor = r
-    const threshold = Math.max(B.minLevel, floor * B.overNoise, echo * outHold * B.overEcho)
+    const threshold = Math.max(M.minLevel, floor * M.overNoise, echo * outHold * M.overEcho)
     const loud = r > threshold
     if (debug) {
-      window.__bargeLog.push({ ms: Math.round(performance.now() - opened), mic: +r.toFixed(4), threshold: +threshold.toFixed(4),
-        simon: +outHold.toFixed(3), echo: +echo.toFixed(3), noise: +floor.toFixed(4) })
+      window.__micLog.push({ ms: Math.round(performance.now() - opened), talking, mic: +r.toFixed(4),
+        threshold: +threshold.toFixed(4), simon: +outHold.toFixed(3), echo: +echo.toFixed(3), noise: +floor.toFixed(4) })
     }
-    if (performance.now() - opened < B.warmupMs) { // learn only
-      floor = Math.min(floor, r)
-      if (outHold > 0.02) echo = Math.min(1.5, Math.max(echo * 0.9, r / outHold))
+
+    if (talking) {
+      const voiced = r > Math.max(M.minLevel * 0.8, floor * 2)
+      userLevel = voiced ? r : userLevel * 0.6
+      if (voiced) speechMs += frameMs
+      quietMs = voiced ? 0 : quietMs + frameMs
+      if (quietMs >= M.endSilenceMs || (length / rate) * 1000 >= M.maxMs) finish()
       return
     }
+
+    // waiting: keep only the last moments as pre-roll
+    const keep = Math.ceil((M.preRollMs / 1000) * rate)
+    while (length - frames[0].length >= keep) length -= frames.shift().length
     if (!loud) { // learn the room and the echo from moments without the user's voice
       floor = r < floor ? floor * 0.7 + r * 0.3 : floor * 0.98 + r * 0.02
       if (outHold > 0.02) {
@@ -533,20 +549,27 @@ export async function createBargeIn({ onStart, onUtterance }) {
         echo = Math.min(1.5, echo + (seen - echo) * (seen > echo ? 0.2 : 0.02))
       }
     }
-    if (loud) { run++; gaps = 0 } else if (run && ++gaps > 1) { run = 0; gaps = 0 }
-    if (run * frameMs >= B.startMs) {
-      state = 'talking'
+    if (performance.now() - opened < M.warmupMs) return
+    // speech in the last half second (a short first word like "Stopp," followed by a breath still counts)
+    recent.push(loud)
+    if (recent.length > windowFrames) recent.shift()
+    const voicedMs = recent.filter(Boolean).length * frameMs
+    if (loud && voicedMs >= (outHold > 0.02 ? M.startOverSimonMs : M.startMs)) {
+      recent.length = 0
+      if (onSpeech?.() === false) return // ignored: keep waiting
+      talking = true
       quietMs = 0
-      onStart?.()
+      speechMs = voicedMs
     }
   }
 
-  return { close, finish, get talking() { return state === 'talking' } }
+  return { close, finish, get talking() { return talking } }
 }
 
-/** Whisper writes subtitle credits for noise ("Untertitel im Auftrag des ZDF"); those are not the user. */
+/** Whisper writes subtitle credits for noise ("Untertitel im Auftrag des ZDF") or only "hm"; those are not the user. */
 export function realSpeech(text) {
   const t = (text || '').toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim()
   if (t.length < 2) return false
+  if (/^(hm+|mhm|äh+m?|ah+|oh+|uh+|um+|eh+)$/.test(t)) return false
   return !/untertitel|amara org|im auftrag des|fürs zuschauen|for watching|abonnier|subscribe/.test(t)
 }
