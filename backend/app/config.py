@@ -51,7 +51,8 @@ class Settings(BaseSettings):
     tts_voice_en: str = "en-GB-RyanNeural"
     # German voice through Fish Audio (free model s2.1-pro-free only); empty key = standard voice above
     fish_audio_key: str = ""
-    fish_voice_id: str = "52c4b7e78af343d7aed558478a19e6cb"  # "Jens Deutsche Stimme": licensed, deep, calm narrator
+    fish_voice_id: str = "52c4b7e78af343d7aed558478a19e6cb"  # German: "Jens Deutsche Stimme", licensed, deep, calm
+    fish_voice_id_en: str = "c700b259c8554960b218a7cb275ee565"  # English: "SUPER AI ASSISTANT - Jarvis", licensed, calm
 
     def voice_for(self, lang: str | None) -> str:
         return self.tts_voice_en if lang == "en" else self.tts_voice_de

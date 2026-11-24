@@ -22,7 +22,8 @@ calm, competent, warm, a little witty, always loyal and honest.
 
 Now: {now} ({tz}). User's home city: {city}.
 {lang_rule} Answers are often read aloud, so keep them natural and concise; avoid tables
-and long lists unless asked. Address the user by name if you know it.
+and long lists unless asked. Never use emojis, Markdown headings (#) or Markdown tables.
+Address the user by name if you know it.{voice_rule}
 
 What you remember about the user:
 {memories}
@@ -58,14 +59,20 @@ TEXT = {
 }
 
 
-def _system_prompt(lang: str) -> str:
+VOICE_RULE = ("\n\nThe user asked by voice and will HEAR your answer: reply in at most three short spoken "
+              "sentences, with no lists, then offer more detail if it would help. Talk like a calm, warm person "
+              "in a real conversation: natural everyday phrasing, varied sentence length, no formal report "
+              "style, and round numbers the way people say them (\"about fifty-five thousand euros\").")
+
+
+def _system_prompt(lang: str, spoken: bool = False) -> str:
     tz = ZoneInfo(settings.timezone)
     with SessionLocal() as s:
         pending = s.scalars(select(PendingAction).where(PendingAction.status == "pending")
                             .order_by(PendingAction.id.desc()).limit(5)).all()
     pending_txt = "; ".join(f"#{p.id} {p.summary}" for p in pending) or "none"
     return SYSTEM.format(name=settings.assistant_name, now=datetime.now(tz).strftime("%A %d %B %Y, %H:%M"),
-                         tz=settings.timezone, city=settings.default_city, lang_rule=LANG_RULES[lang],
+                         tz=settings.timezone, city=settings.default_city, lang_rule=LANG_RULES[lang], voice_rule=VOICE_RULE if spoken else "",
                          memories=memory.memory_block(), pending=pending_txt)
 
 
@@ -98,7 +105,7 @@ def save_message(conversation_id: int, role: str, content: str, **extra) -> int:
 
 
 def run_turn(conversation_id: int, user_text: str | None, allow_paid: bool = False,
-             language: str | None = None) -> Iterator[dict]:
+             language: str | None = None, spoken: bool = False) -> Iterator[dict]:
     """Streams UI events: provider, token, tool, chart/link/approval cards, paid_required, error, done."""
     lang = settings.lang(language)
     say = TEXT[lang]
@@ -111,7 +118,7 @@ def run_turn(conversation_id: int, user_text: str | None, allow_paid: bool = Fal
                                                    Message.role == "user").order_by(Message.id.desc())).first()
         user_text = last.content if last else ""
 
-    messages = [{"role": "system", "content": _system_prompt(lang)}] + _history(conversation_id)
+    messages = [{"role": "system", "content": _system_prompt(lang, spoken)}] + _history(conversation_id)
     ctx = ToolContext(conversation_id=conversation_id, user_message=user_text, turn_started_at=turn_started,
                       language=lang)
     answer, cards, provider = "", [], None

@@ -337,7 +337,7 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew }) {
       setOrb('idle')
     }
     try {
-      await streamChat({ message: text, conversation_id: convRef.current, allow_paid: allowPaid, language: currentLang() }, (ev) => {
+      await streamChat({ message: text, conversation_id: convRef.current, allow_paid: allowPaid, language: currentLang(), spoken: !!speaker }, (ev) => {
         if (ev.type === 'conversation' && ev.id !== convRef.current) {
           skipLoad.current = true
           convRef.current = ev.id
@@ -602,17 +602,69 @@ function Card({ card, onDecide }) {
 }
 
 /* Minimal, safe text rendering: paragraphs, bullet lines, **bold**, links. */
-function renderText(text) {
-  const inline = (line) => line.split(/(\*\*[^*]+\*\*|https?:\/\/\S+)/g).map((part, k) => {
+const BULLET = /^\s*([-*•]|\d+\.)\s+/
+const isRule = (l) => /^\s*([-*_]\s*){3,}$/.test(l)
+const cellsOf = (row) => row.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim())
+const isSeparator = (row) => cellsOf(row).every((c) => /^:?-{2,}:?$/.test(c))
+
+function inline(line) {
+  return line.split(/(\*\*[^*]+\*\*|\*[^*\s][^*]*\*|https?:\/\/\S+)/g).map((part, k) => {
     if (/^\*\*[^*]+\*\*$/.test(part)) return <strong key={k}>{part.slice(2, -2)}</strong>
+    if (/^\*[^*\s][^*]*\*$/.test(part)) return <em key={k}>{part.slice(1, -1)}</em>
     if (/^https?:\/\//.test(part)) return <a key={k} href={part} target="_blank" rel="noreferrer">{part.replace(/^https?:\/\/(www\.)?/, '').slice(0, 48)}</a>
     return part
   })
-  return text.split(/\n{2,}/).map((block, i) => {
-    const lines = block.split('\n')
-    if (lines.every((l) => /^\s*([-*•]|\d+\.)\s+/.test(l))) {
-      return <ul key={i}>{lines.map((l, k) => <li key={k}>{inline(l.replace(/^\s*([-*•]|\d+\.)\s+/, ''))}</li>)}</ul>
+}
+
+function mdTable(rows, key) {
+  const data = rows.filter((r) => !isSeparator(r)).map(cellsOf)
+  const hasHead = rows.length > 1 && isSeparator(rows[1])
+  const [head, ...body] = hasHead ? data : [null, ...data]
+  return (
+    <div key={key} className="md-table-wrap">
+      <table className="md-table">
+        {head && <thead><tr>{head.map((c, i) => <th key={i}>{inline(c)}</th>)}</tr></thead>}
+        <tbody>{body.map((r, i) => <tr key={i}>{r.map((c, j) => <td key={j}>{inline(c)}</td>)}</tr>)}</tbody>
+      </table>
+    </div>
+  )
+}
+
+/* Small, safe Markdown: paragraphs, bullet lists, headings, tables, **bold**, *italic*, links. */
+function renderText(text) {
+  const out = []
+  const lines = text.split('\n')
+  let para = []
+  const flush = () => {
+    if (para.length) out.push(<p key={out.length}>{para.map((l, k) => <span key={k}>{k > 0 && <br />}{inline(l)}</span>)}</p>)
+    para = []
+  }
+  for (let i = 0; i < lines.length;) {
+    const line = lines[i]
+    if (!line.trim() || isRule(line)) { flush(); i++; continue }
+    if (/^\s*#{1,6}\s+/.test(line)) {
+      flush()
+      out.push(<h4 key={out.length} className="md-h">{inline(line.replace(/^\s*#{1,6}\s+/, ''))}</h4>)
+      i++
+      continue
     }
-    return <p key={i}>{lines.map((l, k) => <span key={k}>{k > 0 && <br />}{inline(l)}</span>)}</p>
-  })
+    if (/^\s*\|/.test(line)) {
+      flush()
+      const rows = []
+      while (i < lines.length && /^\s*\|/.test(lines[i])) rows.push(lines[i++])
+      out.push(mdTable(rows, out.length))
+      continue
+    }
+    if (BULLET.test(line)) {
+      flush()
+      const items = []
+      while (i < lines.length && BULLET.test(lines[i])) items.push(lines[i++].replace(BULLET, ''))
+      out.push(<ul key={out.length}>{items.map((l, k) => <li key={k}>{inline(l)}</li>)}</ul>)
+      continue
+    }
+    para.push(line)
+    i++
+  }
+  flush()
+  return out
 }

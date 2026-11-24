@@ -18,22 +18,23 @@ from .db import log_activity
 
 FISH_URL = "https://api.fish.audio/v1/tts"
 FREE_MODEL = "s2.1-pro-free"
-SAMPLE_RATE = 24000  # raw 16-bit mono PCM, played by the app while it streams in
+SAMPLE_RATE = 44100  # raw 16-bit mono PCM at full quality, played by the app while it streams in
 _paused_until = 0.0
 
 
 def fish_enabled(lang: str) -> bool:
-    return lang == "de" and bool(settings.fish_audio_key) and time.time() >= _paused_until
+    return lang in ("de", "en") and bool(settings.fish_audio_key) and time.time() >= _paused_until
 
 
-async def fish_stream(text: str):
+async def fish_stream(text: str, lang: str = "de"):
     """Opens a streaming Fish Audio request. Returns (client, response) on success, None to fall back."""
     global _paused_until
     headers = {"Authorization": f"Bearer {settings.fish_audio_key}", "model": FREE_MODEL}
     if headers["model"] != "s2.1-pro-free":  # never send anything but the free model
         return None
-    body = {"text": text, "reference_id": settings.fish_voice_id, "format": "pcm", "sample_rate": SAMPLE_RATE,
-            "latency": "balanced", "normalize": True, "language": "de"}
+    voice = settings.fish_voice_id_en if lang == "en" else settings.fish_voice_id
+    body = {"text": text, "reference_id": voice, "format": "pcm", "sample_rate": SAMPLE_RATE,
+            "latency": "balanced", "normalize": True, "language": lang}
     client = httpx.AsyncClient(timeout=httpx.Timeout(25, connect=5))
     for attempt in (1, 2):
         try:

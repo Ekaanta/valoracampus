@@ -118,6 +118,7 @@ class ChatIn(BaseModel):
     conversation_id: int | None = None
     allow_paid: bool = False  # True only after the user approved the paid provider in the UI
     language: str | None = None  # "de" | "en": interface language of the device
+    spoken: bool = False  # the answer will be read aloud: keep it short
 
 
 def _sse(events):
@@ -131,7 +132,7 @@ def chat(body: ChatIn):
 
     def events():
         yield {"type": "conversation", "id": conv_id}
-        yield from run_turn(conv_id, body.message, allow_paid=body.allow_paid, language=body.language)
+        yield from run_turn(conv_id, body.message, allow_paid=body.allow_paid, language=body.language, spoken=body.spoken)
 
     return StreamingResponse(_sse(events()), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
@@ -333,12 +334,12 @@ class TTSIn(BaseModel):
 
 @app.post("/api/tts", dependencies=[Depends(auth)])
 async def tts(body: TTSIn):
-    """German: Fish Audio (free model), streamed as raw PCM so playback starts at once.
-    Otherwise, or whenever Fish is not usable: the standard voice (edge-tts) as one MP3."""
+    """German and English: Fish Audio (free model), streamed as raw PCM so playback starts at once.
+    Whenever Fish is not usable: the standard voice (edge-tts) as one MP3."""
     lang = settings.lang(body.lang)
     text = body.text[:4000]
     if not body.voice and fish.fish_enabled(lang):
-        opened = await fish.fish_stream(text)
+        opened = await fish.fish_stream(text, lang)
         if opened:
             client, resp = opened
 

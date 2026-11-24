@@ -93,11 +93,36 @@ export function stopSpeaking() {
   window.speechSynthesis?.cancel()
 }
 
-function plain(text) {
+/**
+ * Text as it should be spoken: no Markdown signs, no emoji, table rows as short sentences,
+ * "€50k" as "50 thousand euros" and "50–55" as "50 to 55" (the voice would read the symbols).
+ */
+function plain(text, lang) {
+  const de = (lang || '').startsWith('de')
+  const thousand = de ? ' Tausend' : ' thousand'
   return text
     .replace(/```[\s\S]*?```/g, ' ')
     .replace(/\[Action #\d+[^\]]*\]/g, '')
-    .replace(/[*_#>`]/g, '')
+    .split('\n').map((line, i, all) => {
+      const separator = (l) => /^\s*\|[\s|:-]*$/.test(l || '')
+      if (/^\s*([-*_]\s*){3,}$/.test(line)) return '' // horizontal rule
+      if (separator(line)) return '' // table separator |---|---|
+      if (/^\s*\|/.test(line) && separator(all[i + 1])) return '' // table header row
+      if (/^\s*#{1,6}\s+/.test(line)) { // a heading becomes its own short sentence (a pause after it)
+        return line.replace(/^\s*#{1,6}\s+/, '').trim().replace(/[.:!?]?$/, '.')
+      }
+      let l = line
+      if (/^\s*\|/.test(l)) { // table row -> "cell: cell."
+        l = l.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim()).filter(Boolean).join(': ') + '.'
+      }
+      return l
+    }).join('\n')
+    .replace(/\p{Extended_Pictographic}\uFE0F?/gu, '')
+    .replace(/(\d\s?k?)\s?[–—]\s?(?=[€$]?\s?\d)/gi, `$1 ${de ? 'bis' : 'to'} `)
+    .replace(/(?:€|EUR)\s?(\d+(?:[.,]\d+)?)\s?k\b/gi, `$1${thousand} ${de ? 'Euro' : 'euros'}`)
+    .replace(/\$\s?(\d+(?:[.,]\d+)?)\s?k\b/gi, `$1${thousand} ${de ? 'Dollar' : 'dollars'}`)
+    .replace(/(\d+(?:[.,]\d+)?)\s?k\s?(?:€|EUR)/gi, `$1${thousand} ${de ? 'Euro' : 'euros'}`)
+    .replace(/[*_#>`|]/g, '')
     .replace(/https?:\/\/\S+/g, 'Link')
     .replace(/\s+/g, ' ')
     .trim()
@@ -250,8 +275,9 @@ export function createSpeaker(lang, { onStart, onSentence } = {}) {
       if (speaker.stopped || ended || !text) return
       pending += text
       let end
-      // the first piece is short so Simon starts quickly; later pieces are longer (fewer requests)
-      while ((end = cutAt(pending, queue.length || started ? 70 : 20)) > 0) {
+      // The first piece is short so Simon starts quickly. Later pieces hold two or three sentences,
+      // so the voice keeps a natural melody across them instead of restarting every sentence.
+      while ((end = cutAt(pending, queue.length || started ? 170 : 20)) > 0) {
         enqueue(pending.slice(0, end))
         pending = pending.slice(end)
       }
@@ -279,7 +305,7 @@ export function createSpeaker(lang, { onStart, onSentence } = {}) {
   }
 
   function enqueue(text) {
-    const clean = plain(text)
+    const clean = plain(text, lang)
     if (!clean) return
     // the audio is requested right away, so the next sentence is ready when the current one ends
     const item = { text: clean, release: null }

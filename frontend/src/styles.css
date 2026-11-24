@@ -238,6 +238,15 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); }
 .prose li + li { margin-top: .25em; }
 .prose li::marker { color: var(--hud-text); }
 .prose strong { font-weight: 600; }
+.prose em { font-style: italic; color: var(--ink); }
+.prose .md-h { font: 600 15px/1.4 var(--sans); margin: .9em 0 .3em; color: var(--hud-text); }
+.prose .md-h:first-child { margin-top: 0; }
+.prose p + ul, .prose ul + ul { margin-top: .5em; }
+.md-table-wrap { overflow-x: auto; margin: .6em 0; }
+.md-table { border-collapse: collapse; font-size: 14px; line-height: 1.45; min-width: 100%; }
+.md-table th { text-align: left; font: 500 10.5px var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--hud-text); padding: 7px 10px; border-bottom: 1px solid var(--line-2); }
+.md-table td { padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.md-table tr:nth-child(even) td { background: var(--panel-2); }
 .toollog { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; font: 11.5px var(--mono); color: var(--ink-2); letter-spacing: .02em; }
 .toollog li { display: flex; align-items: center; gap: 8px; }
 .toollog .tick { width: 6px; height: 6px; background: var(--ink-3); }
