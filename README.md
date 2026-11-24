@@ -111,6 +111,8 @@ a GPU makes local models much faster. Ubuntu 22.04/24.04 + Docker.
 
 ## Extending SIMON
 
+**Change the interface** (sphere, colours, texts, layout) – see [docs/FRONTEND.md](docs/FRONTEND.md).
+
 **Add a tool** – one function in `backend/app/tools.py`:
 
 ```python

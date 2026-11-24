@@ -1,31 +1,31 @@
 /* ============================================================ tokens
    "Agent OS" HUD. Dark = night console (default), light = daylight hologram. */
 :root {
-  --bg: #E4EDF3;
-  --bg-2: #F5F9FC;
-  --grid: rgba(9, 92, 135, .065);
+  --bg: #E6ECF6;
+  --bg-2: #F6F8FD;
+  --grid: rgba(30, 70, 160, .06);
   --panel: rgba(255, 255, 255, .7);
   --panel-solid: #F6FAFC;
-  --panel-2: rgba(10, 120, 170, .05);
+  --panel-2: rgba(40, 90, 200, .05);
   --field: #FFFFFF;
-  --user-bg: rgba(10, 134, 182, .08);
+  --user-bg: rgba(47, 107, 224, .08);
   --ink: #0A1F2E;
   --ink-2: #3D5869;
   --ink-3: #6F8A9B;
-  --line: rgba(11, 80, 118, .14);
-  --line-2: rgba(11, 96, 140, .28);
-  --hud: #0B93C7;
-  --hud-text: #08709A;
-  --hud-hi: #065A80;
-  --hud-glow: rgba(11, 147, 199, .32);
-  --corner: rgba(11, 147, 199, .8);
-  --core: #0FB0E2;
-  --core-hi: #C9F4FF;
+  --line: rgba(25, 60, 140, .14);
+  --line-2: rgba(30, 75, 170, .28);
+  --hud: #2F6BE0;
+  --hud-text: #2456BF;
+  --hud-hi: #173F94;
+  --hud-glow: rgba(47, 107, 224, .3);
+  --corner: rgba(47, 107, 224, .8);
+  --core: #3D78F0;
+  --core-hi: #D6E4FF;
   --glow: .5;
   --reactor-blend: source-over;
-  --accent: #0A86B8;
+  --accent: #2F6BE0;
   --on-accent: #FFFFFF;
-  --accent-soft: rgba(10, 134, 184, .12);
+  --accent-soft: rgba(47, 107, 224, .12);
   --amber: #B46A00;
   --ok: #0E8A57;
   --bad: #C43B3B;
@@ -40,35 +40,35 @@
 
 /* Dark is the default (set in index.html before first paint); light only when the user picks it. */
 :root[data-theme="dark"] {
-  --bg: #030A11;
-  --bg-2: #0A1D2D;
-  --grid: rgba(70, 190, 255, .05);
-  --panel: rgba(6, 21, 34, .68);
-  --panel-solid: #071727;
-  --panel-2: rgba(63, 216, 255, .05);
-  --field: rgba(2, 12, 21, .85);
-  --user-bg: rgba(63, 216, 255, .08);
-  --ink: #D7F2FF;
-  --ink-2: #8FB5C9;
-  --ink-3: #587D91;
-  --line: rgba(80, 200, 255, .13);
-  --line-2: rgba(80, 200, 255, .3);
-  --hud: #3FD8FF;
-  --hud-text: #7ADFFF;
-  --hud-hi: #CFF7FF;
-  --hud-glow: rgba(63, 216, 255, .45);
-  --corner: rgba(63, 216, 255, .85);
-  --core: #1FCFF0;
-  --core-hi: #F2FEFF;
+  --bg: #010208;
+  --bg-2: #07112B;
+  --grid: rgba(120, 160, 255, .045);
+  --panel: rgba(5, 10, 30, .68);
+  --panel-solid: #060C20;
+  --panel-2: rgba(143, 180, 255, .05);
+  --field: rgba(2, 5, 16, .85);
+  --user-bg: rgba(143, 180, 255, .09);
+  --ink: #DCE6FF;
+  --ink-2: #93A6CF;
+  --ink-3: #5B6C93;
+  --line: rgba(130, 170, 255, .13);
+  --line-2: rgba(130, 170, 255, .3);
+  --hud: #8FB4FF;
+  --hud-text: #A6C3FF;
+  --hud-hi: #DCE8FF;
+  --hud-glow: rgba(110, 150, 255, .45);
+  --corner: rgba(143, 180, 255, .85);
+  --core: #5A8CFF;
+  --core-hi: #F2F6FF;
   --glow: 1;
   --reactor-blend: lighter;
-  --accent: #3FD8FF;
-  --on-accent: #021320;
-  --accent-soft: rgba(63, 216, 255, .14);
+  --accent: #8FB4FF;
+  --on-accent: #020614;
+  --accent-soft: rgba(143, 180, 255, .14);
   --amber: #FFB547;
   --ok: #45E2A0;
   --bad: #FF6F6F;
-  --violet: #B79BFF;
+  --violet: #C4A8FF;
   --rose: #FF7EB3;
   --panel-shadow: 0 18px 40px -24px rgba(0, 0, 0, .85);
   color-scheme: dark;
@@ -179,7 +179,7 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); }
 .reactor canvas { position: absolute; left: 0; top: 0; }
 
 .core { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.core.welcome { --rs: clamp(200px, min(44vh, 74vw), 470px); }
+.core.welcome { --rs: clamp(220px, min(48vh, 80vw), 520px); }
 .core-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .welcome .core-body { overflow-y: auto; overscroll-behavior: contain; }
 .core.live { --rs: clamp(130px, 25vh, 240px); }

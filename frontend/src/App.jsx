@@ -6,7 +6,7 @@ import { Brain, Feed, Panel, ProviderList, Sessions, Telemetry } from './hud.jsx
 import { currentLang, locale, plural, speechLang, t, useLang } from './i18n.js'
 import { useTheme } from './theme.js'
 import Chart from './Chart.jsx'
-import Reactor from './Reactor.jsx'
+import Sphere from './Sphere.jsx'
 import Icon from './icons.jsx'
 
 export default function App() {
@@ -69,7 +69,7 @@ function Login({ onDone }) {
     <div className="login">
       <div className="login-theme"><LangToggle /><ThemeToggle /></div>
       <div className="login-card">
-        <div className="login-reactor"><Reactor state={busy ? 'thinking' : 'idle'} /></div>
+        <div className="login-reactor"><Sphere state={busy ? 'thinking' : 'idle'} /></div>
         <Wordmark big />
         <p className="eyebrow">{t('loginNeeded')}</p>
         <form onSubmit={submit} className="login-form">
@@ -269,6 +269,7 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew }) {
   const [busy, setBusy] = useState(false)
   const [interim, setInterim] = useState('')
   const [handsFree, setHandsFree] = useState(false)
+  const [spoken, setSpoken] = useState('') // subtitle under the sphere while Simon speaks
   const skipLoad = useRef(false)
   const listener = useRef(null)
   const bottom = useRef(null)
@@ -320,7 +321,9 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew }) {
       onChanged()
       if ((spoken || handsFreeRef.current) && reply.trim()) {
         setOrb('speaking')
+        setSpoken(reply)
         await speak(reply, speechLang())
+        setSpoken('')
         if (handsFreeRef.current) return startListening()
       }
       setOrb('idle')
@@ -382,7 +385,9 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew }) {
     if (busy) return
     unlockAudio()
     setOrb('speaking')
+    setSpoken(text)
     await speak(text, speechLang())
+    setSpoken('')
     setOrb('idle')
   }
 
@@ -411,14 +416,15 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew }) {
   const empty = messages.length === 0
   const hint = t(`h_${orb}`)
   const lastAi = [...messages].reverse().find((m) => m.role === 'assistant')
-  const caption = interim || (orb === 'thinking' ? (lastAi?.status || t('thinking')) : null)
+  const subtitle = orb === 'speaking' && spoken ? spoken.replace(/[*_#>`]/g, '').replace(/\s+/g, ' ').trim() : ''
+  const caption = interim || subtitle || (orb === 'thinking' ? (lastAi?.status || t('thinking')) : null)
 
   return (
     <div className={empty ? 'core welcome' : 'core live'}>
       <div className="core-body">
         <section className="reactor-stage" aria-label="Simon">
           <button className="reactor-frame" onClick={micClick} aria-label={hint} title={hint}>
-            <Reactor state={orb} />
+            <Sphere state={orb} />
           </button>
           <div className="stage-text">
             {empty && <p className="core-name" aria-hidden="true">SIMON</p>}

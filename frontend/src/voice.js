@@ -60,13 +60,17 @@ let finishCurrent = null
 let analyser = null
 let levels = null
 
-/** Loudness of Simon's voice right now (0–1), or null when nothing is playing through the audio context. */
+/**
+ * Loudness of Simon's voice right now, as the sphere expects it ("target", 0 to 0.7; 0 between words),
+ * or null when nothing is playing through the audio context. Formula from the client's sphere spec.
+ */
 export function voiceLevel() {
   if (!source || !analyser) return null
-  analyser.getByteTimeDomainData(levels)
-  let sum = 0
-  for (let i = 0; i < levels.length; i++) { const v = (levels[i] - 128) / 128; sum += v * v }
-  return Math.min(1, Math.sqrt(sum / levels.length) * 3.2)
+  analyser.getByteFrequencyData(levels)
+  let s = 0
+  for (let i = 4; i < 64; i++) s += levels[i]
+  const l = Math.min(1, (s / 60 / 255) * 2.4)
+  return l < 0.06 ? 0 : Math.min(0.7, l * 0.75)
 }
 
 export function unlockAudio() {
@@ -108,11 +112,12 @@ export async function speak(text, lang) {
       source.buffer = buffer
       if (!analyser) {
         analyser = ctx.createAnalyser()
-        analyser.fftSize = 512
-        levels = new Uint8Array(analyser.fftSize)
+        analyser.fftSize = 1024
+        analyser.smoothingTimeConstant = 0.4
+        levels = new Uint8Array(analyser.frequencyBinCount)
         analyser.connect(ctx.destination)
       }
-      source.connect(analyser) // the reactor reads the voice level from here
+      source.connect(analyser) // the sphere reads the voice level from here
       finishCurrent = () => { finishCurrent = null; resolve() }
       source.onended = () => { source = null; finishCurrent?.() }
       source.start()
