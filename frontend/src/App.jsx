@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, getToken, login, setToken, streamChat } from './api.js'
-import { listen, speak, stopSpeaking, unlockAudio } from './voice.js'
+import { createSpeaker, listen, speak, stopSpeaking, unlockAudio } from './voice.js'
 import { ActivityPanel, HistoryPanel, MemoryPanel, SystemsPanel } from './panels.jsx'
 import { Brain, Feed, Panel, ProviderList, Sessions, Telemetry } from './hud.jsx'
 import { currentLang, locale, plural, speechLang, t, useLang } from './i18n.js'
@@ -270,6 +270,7 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew }) {
   const [interim, setInterim] = useState('')
   const [handsFree, setHandsFree] = useState(false)
   const [spoken, setSpoken] = useState('') // subtitle under the sphere while Simon speaks
+  const turnRef = useRef(0) // the latest send/replay; older ones must not reset the state
   const skipLoad = useRef(false)
   const listener = useRef(null)
   const bottom = useRef(null)
@@ -309,6 +310,11 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew }) {
     setBusy(true)
     setOrb('thinking')
     stopSpeaking()
+    const turn = ++turnRef.current
+    // Voice answers start with the first finished sentence, while the rest is still being written.
+    const speaker = spoken || handsFreeRef.current
+      ? createSpeaker(speechLang(), { onStart: () => setOrb('speaking'), onSentence: setSpoken })
+      : null
     const now = new Date().toISOString()
     setMessages((ms) => [...ms, ...(text ? [{ role: 'user', content: text, created_at: now }] : []),
       { role: 'assistant', content: '', cards: [], tools: [], created_at: now }])
@@ -319,12 +325,12 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew }) {
       finished = true
       setBusy(false)
       onChanged()
-      if ((spoken || handsFreeRef.current) && reply.trim()) {
-        setOrb('speaking')
-        setSpoken(reply)
-        await speak(reply, speechLang())
+      if (speaker) {
+        speaker.end()
+        await speaker.done
+        if (turnRef.current !== turn) return // a newer question already took over
         setSpoken('')
-        if (handsFreeRef.current) return startListening()
+        if (!speaker.stopped && handsFreeRef.current && reply.trim()) return startListening()
       }
       setOrb('idle')
     }
@@ -336,7 +342,11 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew }) {
           setConvId(ev.id)
         } else if (ev.type === 'status') patchLast((m) => ({ ...m, status: ev.text }))
         else if (ev.type === 'provider') patchLast((m) => ({ ...m, provider: ev.name, model: ev.model }))
-        else if (ev.type === 'token') { reply += ev.text; patchLast((m) => ({ ...m, status: null, content: m.content + ev.text })) }
+        else if (ev.type === 'token') {
+          reply += ev.text
+          speaker?.push(ev.text)
+          patchLast((m) => ({ ...m, status: null, content: m.content + ev.text }))
+        }
         else if (ev.type === 'tool') patchLast((m) => ({ ...m, tools: [...m.tools.filter((x) => x.name !== ev.name), ev] }))
         else if (['chart', 'link', 'approval'].includes(ev.type)) patchLast((m) => ({ ...m, cards: [...(m.cards || []), ev] }))
         else if (ev.type === 'paid_required') patchLast((m) => ({ ...m, paid: ev }))
@@ -369,7 +379,7 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew }) {
   }
 
   const micClick = () => {
-    if (orb === 'speaking') { stopSpeaking(); setOrb('idle'); return }
+    if (orb === 'speaking') { stopSpeaking(); setOrb(busy ? 'thinking' : 'idle'); return }
     if (listener.current) { listener.current.stop(); return }
     if (!busy) startListening()
   }
@@ -384,9 +394,10 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew }) {
   const speakAgain = async (text) => {
     if (busy) return
     unlockAudio()
-    setOrb('speaking')
-    setSpoken(text)
-    await speak(text, speechLang())
+    const turn = ++turnRef.current
+    setOrb('thinking')
+    await speak(text, speechLang(), { onStart: () => setOrb('speaking'), onSentence: setSpoken })
+    if (turnRef.current !== turn) return
     setSpoken('')
     setOrb('idle')
   }

@@ -59,7 +59,7 @@ class Settings(BaseSettings):
 
     # --- AI providers, tried in this order (free first) ---------------------
     # 1) FreeLLMAPI: one OpenAI-compatible endpoint in front of many free providers (own server)
-    freellmapi_url: str = "http://localhost:3001/v1"
+    freellmapi_url: str = "http://127.0.0.1:3001/v1"  # 127.0.0.1, not localhost: avoids a ~2 s IPv6 retry on Windows
     freellmapi_key: str = ""
     freellmapi_model: str = "auto"
     # 2) Direct free tiers, used where FreeLLMAPI cannot run (e.g. Vercel)
@@ -71,7 +71,7 @@ class Settings(BaseSettings):
     openrouter_api_key: str = ""
     openrouter_model: str = ""  # e.g. a ":free" model id from openrouter.ai/models
     # 3) Ollama: local models on the server (leave empty where no Ollama runs)
-    ollama_url: str = "http://localhost:11434/v1"
+    ollama_url: str = "http://127.0.0.1:11434/v1"
     ollama_model: str = ""
     # 4) Optional paid provider: NEVER used without the user's explicit approval
     paid_name: str = ""
