@@ -12,7 +12,7 @@ import re
 
 from sqlalchemy import or_, select
 
-from .db import Memory, Message, SessionLocal, log_activity, utcnow
+from .db import Conversation, Memory, Message, SessionLocal, log_activity, utcnow
 
 EXTRACT_SYSTEM = """You maintain the long-term memory of a personal AI assistant.
 From the USER's message, extract durable facts about the user worth remembering for weeks or months:
@@ -48,33 +48,39 @@ JSON:"""
 CATEGORIES = {"profile", "preference", "project", "decision", "task", "other"}
 
 
-def recent_memories(limit: int = 80) -> list[Memory]:
+def recent_memories(limit: int = 80, user_id: int | None = None) -> list[Memory]:
     with SessionLocal() as s:
-        rows = s.scalars(select(Memory).order_by(Memory.updated_at.desc()).limit(limit)).all()
+        rows = s.scalars(select(Memory).where(Memory.user_id == user_id)
+                         .order_by(Memory.updated_at.desc()).limit(limit)).all()
     return list(reversed(rows))
 
 
-def memory_block() -> str:
-    rows = recent_memories()
+def memory_block(user_id: int | None = None) -> str:
+    rows = recent_memories(user_id=user_id)
     if not rows:
         return "(nothing stored yet - learn about the user as you talk)"
     return "\n".join(f"- [{m.id}] {m.content} ({m.category})" for m in rows)
 
 
-def add_memory(content: str, category: str = "other", source: str = "user") -> Memory:
+def add_memory(content: str, category: str = "other", source: str = "user", user_id: int | None = None) -> Memory:
     with SessionLocal() as s:
-        m = Memory(content=content.strip(), category=category if category in CATEGORIES else "other", source=source)
+        m = Memory(content=content.strip(), category=category if category in CATEGORIES else "other", source=source,
+                   user_id=user_id)
         s.add(m)
         s.commit()
         return m
 
 
-def search(query: str, limit: int = 8) -> dict:
+def search(query: str, limit: int = 8, user_id: int | None = None) -> dict:
+    """Searches only this user's memories and conversations."""
     words = [w for w in re.findall(r"\w+", query.lower()) if len(w) > 2][:6] or [query.lower()]
     with SessionLocal() as s:
-        mem = s.scalars(select(Memory).where(or_(*[Memory.content.ilike(f"%{w}%") for w in words]))
+        mem = s.scalars(select(Memory).where(Memory.user_id == user_id,
+                                             or_(*[Memory.content.ilike(f"%{w}%") for w in words]))
                         .order_by(Memory.updated_at.desc()).limit(limit)).all()
-        msgs = s.scalars(select(Message).where(or_(*[Message.content.ilike(f"%{w}%") for w in words]))
+        msgs = s.scalars(select(Message).join(Conversation, Conversation.id == Message.conversation_id)
+                         .where(Conversation.user_id == user_id,
+                                or_(*[Message.content.ilike(f"%{w}%") for w in words]))
                          .order_by(Message.created_at.desc()).limit(limit)).all()
     return {
         "memories": [{"id": m.id, "content": m.content, "category": m.category} for m in mem],
@@ -101,10 +107,10 @@ USER: Ich heiße Jonas, wohne in Hamburg und trinke Kaffee ohne Zucker.
 JSON: {"facts": [{"content": "Nutzer heißt Jonas", "category": "profile", "replaces": null}, {"content": "Nutzer wohnt in Hamburg", "category": "profile", "replaces": null}, {"content": "Nutzer trinkt Kaffee ohne Zucker", "category": "preference", "replaces": null}]}"""
 
 
-def extract_and_store(user_text: str, assistant_text: str, lang: str = "en") -> None:
+def extract_and_store(user_text: str, assistant_text: str, lang: str = "en", user_id: int | None = None) -> None:
     from .llm import router  # local import avoids a cycle
 
-    existing = "\n".join(f"{m.id}: {m.content}" for m in recent_memories(120)) or "(none)"
+    existing = "\n".join(f"{m.id}: {m.content}" for m in recent_memories(120, user_id)) or "(none)"
     prompt = EXTRACT_PROMPT.format(existing=existing, user=user_text[:3000], assistant=assistant_text[:2000])
     try:
         system = EXTRACT_SYSTEM + (GERMAN if lang == "de" else "")
@@ -121,11 +127,13 @@ def extract_and_store(user_text: str, assistant_text: str, lang: str = "en") -> 
                 continue
             category = f.get("category") if f.get("category") in CATEGORIES else "other"
             target = s.get(Memory, f.get("replaces")) if isinstance(f.get("replaces"), int) else None
+            if target and target.user_id != user_id:  # never touch another user's memory
+                target = None
             if target:
                 target.content, target.category, target.updated_at = content, category, utcnow()
             else:
-                s.add(Memory(content=content, category=category, source="auto"))
+                s.add(Memory(content=content, category=category, source="auto", user_id=user_id))
             saved.append(content)
         s.commit()
     if saved:
-        log_activity("memory", f"Learned {len(saved)} new fact(s)", {"facts": saved})
+        log_activity("memory", f"Learned {len(saved)} new fact(s)", {"facts": saved}, user_id=user_id)

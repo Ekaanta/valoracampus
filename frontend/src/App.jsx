@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { api, getToken, login, setToken, streamChat } from './api.js'
+import { api, getToken, login, setupAdmin, streamChat } from './api.js'
 import { createSpeaker, listen, setVoicePrefs, speak, stopSpeaking, unlockAudio, voicePrefs } from './voice.js'
-import { ActivityPanel, HistoryPanel, MemoryPanel, SystemsPanel } from './panels.jsx'
+import { AccountPanel, ActivityPanel, AdminPanel, HistoryPanel, MemoryPanel, SystemsPanel } from './panels.jsx'
 import { Brain, Feed, Panel, ProviderList, Sessions, Telemetry } from './hud.jsx'
 import { currentLang, locale, plural, speechLang, t, useLang } from './i18n.js'
 import { useTheme } from './theme.js'
@@ -12,11 +12,9 @@ import Icon from './icons.jsx'
 export default function App() {
   useLang() // re-render everything when the interface language changes
   const [authed, setAuthed] = useState(!!getToken())
-  const [needLogin, setNeedLogin] = useState(null) // asked from the server: login page on or off
+  const [setupNeeded, setSetupNeeded] = useState(null) // true on the very first start (no account yet)
   useEffect(() => {
-    // Login only when the server says so. If the check fails (cold start, network), open the app:
-    // the server still refuses requests when login is required, so nothing is exposed.
-    fetch('/api/config').then((r) => r.json()).then((c) => setNeedLogin(!!c.require_login)).catch(() => setNeedLogin(false))
+    fetch('/api/config').then((r) => r.json()).then((c) => setSetupNeeded(!!c.setup_needed)).catch(() => setSetupNeeded(false))
   }, [])
   useEffect(() => {
     const off = () => setAuthed(false)
@@ -27,9 +25,9 @@ export default function App() {
     window.addEventListener('keydown', unlock, { once: true })
     return () => window.removeEventListener('simon-logout', off)
   }, [])
-  if (needLogin === null) return null
-  if (!needLogin) return <Shell canLogout={false} />
-  return authed ? <Shell canLogout /> : <Login onDone={() => setAuthed(true)} />
+  if (setupNeeded === null) return null
+  if (setupNeeded && !authed) return <Setup onDone={() => { setSetupNeeded(false); setAuthed(true) }} />
+  return authed ? <Shell /> : <Login onDone={() => setAuthed(true)} />
 }
 
 function ThemeToggle() {
@@ -55,33 +53,73 @@ function Wordmark({ big = false }) {
   return <span className={big ? 'wordmark big' : 'wordmark'} aria-label="Simon">S.I.M.O.N</span>
 }
 
-/* ------------------------------------------------------------------ login */
-function Login({ onDone }) {
-  const [pw, setPw] = useState('')
-  const [err, setErr] = useState('')
-  const [busy, setBusy] = useState(false)
-  const submit = async (e) => {
-    e.preventDefault()
-    setBusy(true)
-    setErr('')
-    try { await login(pw); onDone() } catch (x) { setErr(x.message) }
-    setBusy(false)
-  }
+/* ------------------------------------------------------------------ login and first-run setup */
+function AuthFrame({ busy, title, sub, children }) {
   return (
     <div className="login">
       <div className="login-theme"><LangToggle /><ThemeToggle /></div>
       <div className="login-card">
         <div className="login-reactor"><Sphere state={busy ? 'thinking' : 'idle'} /></div>
         <Wordmark big />
-        <p className="eyebrow">{t('loginNeeded')}</p>
-        <form onSubmit={submit} className="login-form">
-          <input type="password" placeholder={t('password')} value={pw} onChange={(e) => setPw(e.target.value)}
-                 autoFocus autoComplete="current-password" aria-label={t('password')} />
-          <button className="btn primary icon-only" disabled={!pw || busy} aria-label={t('signIn')}><Icon name="arrowUp" className="rot90" /></button>
-        </form>
-        <p className="login-err" role="alert">{err}</p>
+        <p className="eyebrow">{title}</p>
+        {sub && <p className="login-sub">{sub}</p>}
+        {children}
       </div>
     </div>
+  )
+}
+
+function Login({ onDone }) {
+  const [form, setForm] = useState({ username: '', password: '' })
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+  const submit = async (e) => {
+    e.preventDefault()
+    setBusy(true)
+    setErr('')
+    try { await login(form.username, form.password); onDone() } catch (x) { setErr(x.status === 401 ? t('wrongLogin') : t('loginFailed')) }
+    setBusy(false)
+  }
+  return (
+    <AuthFrame busy={busy} title={t('loginNeeded')}>
+      <form onSubmit={submit} className="login-form stack">
+        <input placeholder={t('username')} value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })}
+               autoFocus autoCapitalize="none" autoComplete="username" aria-label={t('username')} />
+        <input type="password" placeholder={t('password')} value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })}
+               autoComplete="current-password" aria-label={t('password')} />
+        <button className="btn primary" disabled={!form.username || !form.password || busy}>{t('signIn')}</button>
+      </form>
+      <p className="login-err" role="alert">{err}</p>
+    </AuthFrame>
+  )
+}
+
+function Setup({ onDone }) {
+  const [form, setForm] = useState({ display_name: '', username: '', password: '', again: '' })
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+  const set = (key) => (e) => setForm({ ...form, [key]: e.target.value })
+  const submit = async (e) => {
+    e.preventDefault()
+    if (form.password !== form.again) return setErr(t('pwMismatch'))
+    setBusy(true)
+    setErr('')
+    try { await setupAdmin(form.username, form.password, form.display_name); onDone() } catch (x) {
+      setErr(x.status === 409 ? t('alreadySetUp') : t('userRules'))
+    }
+    setBusy(false)
+  }
+  return (
+    <AuthFrame busy={busy} title={t('setupFirst')} sub={t('setupSub')}>
+      <form onSubmit={submit} className="login-form stack">
+        <input placeholder={t('displayName')} value={form.display_name} onChange={set('display_name')} autoFocus aria-label={t('displayName')} />
+        <input placeholder={t('username')} value={form.username} onChange={set('username')} autoCapitalize="none" autoComplete="username" aria-label={t('username')} />
+        <input type="password" placeholder={t('password')} value={form.password} onChange={set('password')} autoComplete="new-password" aria-label={t('password')} />
+        <input type="password" placeholder={t('passwordAgain')} value={form.again} onChange={set('again')} autoComplete="new-password" aria-label={t('passwordAgain')} />
+        <button className="btn primary" disabled={!form.username || !form.password || busy}>{t('createAccount')}</button>
+      </form>
+      <p className="login-err" role="alert">{err}</p>
+    </AuthFrame>
   )
 }
 
@@ -108,8 +146,10 @@ function Clock() {
   )
 }
 
-function Shell({ canLogout }) {
+function Shell() {
   const [view, setView] = useState('core')
+  const [me, setMe] = useState(null) // the signed-in user
+  const [, setLang] = useLang()
   const [convs, setConvs] = useState([])
   const [convId, setConvId] = useState(null)
   const [alerts, setAlerts] = useState([])
@@ -134,6 +174,11 @@ function Shell({ canLogout }) {
   useEffect(() => {
     refreshAll()
     api('/voices').then(setVoices).catch(() => {})
+    api('/me').then((m) => {
+      setMe(m)
+      // a new device starts in the language the administrator chose
+      try { if (!localStorage.getItem('simon_lang') && m.language) setLang(m.language) } catch { /* private mode */ }
+    }).catch(() => {})
     fetch('/api/health').then((r) => r.json()).then((h) => setSetup(h.problems || [])).catch(() => {})
     const timer = setInterval(() => { if (!document.hidden) refreshDeck() }, 15000)
     return () => clearInterval(timer)
@@ -184,8 +229,14 @@ function Shell({ canLogout }) {
         <Clock />
         <LangToggle />
         <ThemeToggle />
-        {canLogout && (
-          <button className="icon-btn" onClick={() => { setToken(null); location.reload() }} aria-label={t('logout')} title={t('logout')}><Icon name="logout" /></button>
+        {me?.role === 'admin' && (
+          <button className="icon-btn admin-btn" onClick={() => setView('admin')} aria-label={t('adminTitle')} title={t('adminTitle')}><Icon name="gear" /></button>
+        )}
+        {me && (
+          <button className="user-btn" onClick={() => setView('account')} aria-label={t('accTitle')} title={t('accTitle')}>
+            <span className="avatar">{(me.display_name || me.username).slice(0, 1).toUpperCase()}</span>
+            <span className="user-name">{me.display_name}</span>
+          </button>
         )}
       </header>
 
@@ -224,6 +275,10 @@ function Shell({ canLogout }) {
           {view === 'memory' && <MemoryPanel onBack={back} onChanged={refreshDeck} />}
           {view === 'activity' && <ActivityPanel onBack={back} />}
           {view === 'systems' && <SystemsPanel onBack={back} providers={providers} stats={stats} />}
+          {view === 'account' && <AccountPanel me={me} onBack={back} onAdmin={() => setView('admin')} />}
+          {view === 'admin' && me?.role === 'admin' && (
+            <AdminPanel me={me} onBack={back} onSettingsChanged={() => api('/voices').then(setVoices).catch(() => {})} />
+          )}
           {view === 'history' && (
             <HistoryPanel onBack={back} convs={convs} convId={convId} onOpen={open} onNew={() => open(null)}
                           onChanged={(id) => { if (id === convId) setConvId(null); refreshAll() }} />
@@ -608,7 +663,7 @@ function VoicePicker({ voices, onPreview }) {
   const [prefs, setPrefs] = useState(voicePrefs)
   const list = voices?.[lang] || []
   if (!list.length) return null
-  const voice = list.some((v) => v.key === prefs[lang]) ? prefs[lang] : list[0].key
+  const voice = list.some((v) => v.key === prefs[lang]) ? prefs[lang] : (voices[`default_${lang}`] || list[0].key)
   const speed = voices.speeds.includes(prefs.speed) ? prefs.speed : voices.default_speed
   const change = (patch) => { setPrefs(setVoicePrefs(patch)); onPreview() }
   const speedNames = [t('speedCalm'), t('speedNormal'), t('speedBrisk')]

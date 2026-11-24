@@ -64,7 +64,7 @@ docker compose exec ollama ollama pull qwen2.5:3b      # local fallback model
    ```bash
    cd frontend && npm install && npm run dev
    ```
-   Open http://localhost:5173 and log in with `APP_PASSWORD`.
+   Open http://localhost:5173. On the very first start, create the administrator account on the setup page.
 
 ## Deploy on Vercel (live demo link)
 
@@ -80,9 +80,7 @@ calls the free tiers of Groq / Gemini / OpenRouter directly; everything else wor
 
    | Name | Value |
    |---|---|
-   | `REQUIRE_LOGIN` | `true` to show the login page (default: off, anyone with the link can use SIMON) |
-   | `APP_PASSWORD` | the login password (needed when `REQUIRE_LOGIN=true`) |
-   | `JWT_SECRET` | a long random string (needed when `REQUIRE_LOGIN=true`) |
+   | `JWT_SECRET` | optional: a long random string for login tokens (otherwise generated once and kept in the database) |
    | `GROQ_API_KEY` | from console.groq.com (free) |
    | `GEMINI_API_KEY` | from aistudio.google.com (free) – optional second provider |
    | `TIMEZONE`, `DEFAULT_CITY`, `LANGUAGE`, `TTS_VOICE_DE`, `TTS_VOICE_EN` | optional |
@@ -113,6 +111,11 @@ a GPU makes local models much faster. Ubuntu 22.04/24.04 + Docker.
 ## Extending SIMON
 
 **Change the interface** (sphere, colours, texts, layout) – see [docs/FRONTEND.md](docs/FRONTEND.md).
+
+**Users and settings without code** – sign in as an administrator and open the gear icon (Verwaltung):
+create users (each has their own conversations, memory and reminders), reset passwords, disable or delete
+accounts, and change Simon's name, home city, time zone, default language, default voices, speaking pace and
+extra instructions. The first account (created on the setup page) is the administrator.
 
 **Add a tool** – one function in `backend/app/tools.py`:
 

@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 
-from . import memory
+from . import memory, store
 from .config import settings
 from .db import Conversation, Message, PendingAction, SessionLocal, log_activity, utcnow
 from .llm import AllProvidersFailed, PaidApprovalRequired, router
@@ -21,7 +21,7 @@ OLD_MESSAGE_CHARS = 1200  # long earlier answers are shortened in that history
 SYSTEM = """You are {name}, the personal AI assistant of your user, in the spirit of J.A.R.V.I.S.:
 calm, competent, warm, a little witty, always loyal and honest.
 
-Now: {now} ({tz}). User's home city: {city}.
+You are talking with {user} (signed in as "{username}"). Now: {now} ({tz}). Home city: {city}.
 {lang_rule} Answers are often read aloud, so keep them natural and concise; avoid tables
 and long lists unless asked. Never use emojis, Markdown headings (#) or Markdown tables.
 Address the user by name if you know it.{voice_rule}
@@ -36,7 +36,7 @@ Rules:
   the matching tool. It waits for the user's explicit confirmation. Never claim it was executed unless
   a tool result says so. Pending actions awaiting confirmation: {pending}
 - If a capability is not available yet, say so honestly instead of pretending.
-- Explain risks when talking about investments; you are not a licensed financial advisor."""
+- Explain risks when talking about investments; you are not a licensed financial advisor.{persona}"""
 
 
 LANG_RULES = {
@@ -66,15 +66,20 @@ VOICE_RULE = ("\n\nThe user asked by voice and will HEAR your answer: reply in a
               "style, and round numbers the way people say them (\"about fifty-five thousand euros\").")
 
 
-def _system_prompt(lang: str, spoken: bool = False) -> str:
-    tz = ZoneInfo(settings.timezone)
+def _system_prompt(lang: str, spoken: bool = False, user_id: int | None = None, user_name: str = "the user",
+                   username: str = "") -> str:
+    cfg = store.get_settings()  # what the administrator set in the app
+    tz = ZoneInfo(cfg["timezone"])
     with SessionLocal() as s:
-        pending = s.scalars(select(PendingAction).where(PendingAction.status == "pending")
+        pending = s.scalars(select(PendingAction).where(PendingAction.status == "pending",
+                                                        PendingAction.user_id == user_id)
                             .order_by(PendingAction.id.desc()).limit(5)).all()
     pending_txt = "; ".join(f"#{p.id} {p.summary}" for p in pending) or "none"
-    return SYSTEM.format(name=settings.assistant_name, now=datetime.now(tz).strftime("%A %d %B %Y, %H:%M"),
-                         tz=settings.timezone, city=settings.default_city, lang_rule=LANG_RULES[lang], voice_rule=VOICE_RULE if spoken else "",
-                         memories=memory.memory_block(), pending=pending_txt)
+    persona = f"\n\nInstructions from the administrator:\n{cfg['persona']}" if cfg["persona"] else ""
+    return SYSTEM.format(name=cfg["assistant_name"], user=user_name, username=username,
+                         now=datetime.now(tz).strftime("%A %d %B %Y, %H:%M"), tz=cfg["timezone"], city=cfg["city"],
+                         lang_rule=LANG_RULES[lang], voice_rule=VOICE_RULE if spoken else "",
+                         memories=memory.memory_block(user_id), pending=pending_txt, persona=persona)
 
 
 def _history(conversation_id: int) -> list[dict]:
@@ -91,11 +96,14 @@ def _history(conversation_id: int) -> list[dict]:
     return out
 
 
-def ensure_conversation(conversation_id: int | None, first_text: str) -> int:
+def ensure_conversation(conversation_id: int | None, first_text: str, user_id: int | None = None) -> int:
+    """The user's own conversation, or a new one (never somebody else's)."""
     with SessionLocal() as s:
         conv = s.get(Conversation, conversation_id) if conversation_id else None
+        if conv and conv.user_id != user_id:
+            conv = None
         if not conv:
-            conv = Conversation(title=(first_text.strip()[:60] or "New conversation"))
+            conv = Conversation(title=(first_text.strip()[:60] or "New conversation"), user_id=user_id)
             s.add(conv)
             s.commit()
         return conv.id
@@ -113,7 +121,8 @@ def save_message(conversation_id: int, role: str, content: str, **extra) -> int:
 
 
 def run_turn(conversation_id: int, user_text: str | None, allow_paid: bool = False,
-             language: str | None = None, spoken: bool = False) -> Iterator[dict]:
+             language: str | None = None, spoken: bool = False, user_id: int | None = None,
+             user_name: str = "the user", username: str = "") -> Iterator[dict]:
     """Streams UI events: provider, token, tool, chart/link/approval cards, paid_required, error, done."""
     lang = settings.lang(language)
     say = TEXT[lang]
@@ -126,9 +135,10 @@ def run_turn(conversation_id: int, user_text: str | None, allow_paid: bool = Fal
                                                    Message.role == "user").order_by(Message.id.desc())).first()
         user_text = last.content if last else ""
 
-    messages = [{"role": "system", "content": _system_prompt(lang, spoken)}] + _history(conversation_id)
+    messages = ([{"role": "system", "content": _system_prompt(lang, spoken, user_id, user_name, username)}]
+                + _history(conversation_id))
     ctx = ToolContext(conversation_id=conversation_id, user_message=user_text, turn_started_at=turn_started,
-                      language=lang)
+                      language=lang, user_id=user_id)
     answer, cards, provider = "", [], None
 
     try:
@@ -191,11 +201,11 @@ def run_turn(conversation_id: int, user_text: str | None, allow_paid: bool = Fal
                 answer += "\n\n"
                 yield {"type": "token", "text": "\n\n"}
     except PaidApprovalRequired as need:
-        log_activity("paid_approval_needed", need.reason, need.to_dict())
+        log_activity("paid_approval_needed", need.reason, need.to_dict(), user_id=user_id)
         yield {"type": "paid_required", **need.to_dict()}
         return
     except AllProvidersFailed as err:
-        log_activity("llm_error", str(err))  # the technical details stay in the activity log
+        log_activity("llm_error", str(err), user_id=user_id)  # the technical details stay in the log
         if err.retry_after is not None:
             wait = max(1, round(err.retry_after) + 1)
             yield {"type": "error", "message": say["limit"].format(s=wait), "retry_after": wait, "retryable": True}
@@ -203,7 +213,7 @@ def run_turn(conversation_id: int, user_text: str | None, allow_paid: bool = Fal
             yield {"type": "error", "message": say["none"], "retry_after": 0, "retryable": True}
         return
     except Exception as err:  # e.g. a stream that broke after the answer had started
-        log_activity("llm_error", f"{type(err).__name__}: {err}")
+        log_activity("llm_error", f"{type(err).__name__}: {err}", user_id=user_id)
         yield {"type": "error", "message": say["broken"], "retry_after": 0, "retryable": True}
         if not answer.strip():
             return
@@ -218,6 +228,6 @@ def run_turn(conversation_id: int, user_text: str | None, allow_paid: bool = Fal
     # would be frozen on serverless hosts.) The UI already finished at "done".
     if answer:
         try:
-            memory.extract_and_store(user_text, answer, lang)
+            memory.extract_and_store(user_text, answer, lang, user_id)
         except Exception as err:
-            log_activity("memory_error", f"{type(err).__name__}: {err}")
+            log_activity("memory_error", f"{type(err).__name__}: {err}", user_id=user_id)

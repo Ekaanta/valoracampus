@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 import httpx
 from sqlalchemy import select
 
-from . import memory
+from . import memory, store
 from .config import settings
 from .db import PendingAction, Reminder, SessionLocal, log_activity, utcnow
 
@@ -32,6 +32,7 @@ class ToolContext:
     conversation_id: int | None = None
     user_message: str = ""
     turn_started_at: datetime = field(default_factory=utcnow)
+    user_id: int | None = None  # whose conversation this is
     language: str = "de"  # interface language: German or English summaries
     ui: list[dict] = field(default_factory=list)  # cards for the UI: charts, links, approvals
 
@@ -72,10 +73,12 @@ def call_tool(name: str, args: dict, ctx: ToolContext) -> dict:
         args = {**args, "_lang": ctx.language}  # summary and later result in the user's language
         summary = t.summarize(args) if t.summarize else f"{name}({args})"
         with SessionLocal() as s:
-            action = PendingAction(conversation_id=ctx.conversation_id, tool=name, args=args, summary=summary)
+            action = PendingAction(conversation_id=ctx.conversation_id, tool=name, args=args, summary=summary,
+                                   user_id=ctx.user_id)
             s.add(action)
             s.commit()
-        log_activity("approval_requested", summary, {"action_id": action.id, "tool": name, "args": args})
+        log_activity("approval_requested", summary, {"action_id": action.id, "tool": name, "args": args},
+                     user_id=ctx.user_id)
         ctx.ui.append({"type": "approval", "action": {"id": action.id, "summary": summary, "status": "pending"}})
         return {"status": "awaiting_confirmation", "action_id": action.id, "summary": summary,
                 "note": "NOTHING has been executed. Tell the user what is prepared and ask for explicit confirmation."}
@@ -83,37 +86,39 @@ def call_tool(name: str, args: dict, ctx: ToolContext) -> dict:
         result = t.run(args, ctx)
     except Exception as err:
         result = {"error": f"{type(err).__name__}: {err}"}
-    log_activity("tool", name, {"args": args, "ok": "error" not in result})
+    log_activity("tool", name, {"args": args, "ok": "error" not in result}, user_id=ctx.user_id)
     return result
 
 
-def execute_action(action_id: int) -> dict:
-    """Runs a confirmed sensitive action. Called by the Confirm button or confirm_action."""
+def execute_action(action_id: int, user_id: int | None = None) -> dict:
+    """Runs a confirmed sensitive action. Called by the Confirm button or confirm_action (own actions only)."""
     with SessionLocal() as s:
         action = s.get(PendingAction, action_id)
-        if not action or action.status != "pending":
+        if not action or action.status != "pending" or action.user_id != user_id:
             return {"error": "There is no pending action with this id."}
+        owner = action.user_id
         try:
-            result = REGISTRY[action.tool].run(action.args, ToolContext(conversation_id=action.conversation_id))
+            result = REGISTRY[action.tool].run(action.args, ToolContext(conversation_id=action.conversation_id,
+                                                                        user_id=owner))
         except Exception as err:
             result = {"error": f"{type(err).__name__}: {err}"}
         action.status = "failed" if "error" in result or result.get("executed") is False else "done"
         action.result, action.decided_at = result, utcnow()
         s.commit()
         out = {"action_id": action.id, "status": action.status, "summary": action.summary, "result": result}
-    log_activity("approval_executed", f"Confirmed: {out['summary']}", out)
+    log_activity("approval_executed", f"Confirmed: {out['summary']}", out, user_id=owner)
     return out
 
 
-def reject_action(action_id: int) -> dict:
+def reject_action(action_id: int, user_id: int | None = None) -> dict:
     with SessionLocal() as s:
         action = s.get(PendingAction, action_id)
-        if not action or action.status != "pending":
+        if not action or action.status != "pending" or action.user_id != user_id:
             return {"error": "There is no pending action with this id."}
         action.status, action.decided_at = "rejected", utcnow()
         s.commit()
         summary = action.summary
-    log_activity("approval_rejected", f"Rejected: {summary}")
+    log_activity("approval_rejected", f"Rejected: {summary}", user_id=user_id)
     return {"action_id": action_id, "status": "rejected", "summary": summary}
 
 
@@ -130,13 +135,13 @@ def _confirm_action(args: dict, ctx: ToolContext) -> dict:
     action_id = int(args["action_id"])
     with SessionLocal() as s:
         action = s.get(PendingAction, action_id)
-        if not action or action.status != "pending":
+        if not action or action.status != "pending" or action.user_id != ctx.user_id:
             return {"error": "There is no pending action with this id."}
         created = action.created_at if action.created_at.tzinfo else action.created_at.replace(tzinfo=timezone.utc)
     # Safety: the action must come from an earlier turn and the user must have said yes now.
     if created >= ctx.turn_started_at or not AFFIRMATIVE.search(ctx.user_message):
         return {"error": "Not executed: the user has to confirm explicitly in a new message or with the Confirm button."}
-    result = execute_action(action_id)
+    result = execute_action(action_id, ctx.user_id)
     ctx.ui.append({"type": "approval", "action": {"id": action_id, "summary": result.get("summary"),
                                                   "status": result.get("status")}})
     return result
@@ -145,7 +150,7 @@ def _confirm_action(args: dict, ctx: ToolContext) -> dict:
 @tool("cancel_action", "Cancel a prepared sensitive action the user does not want.",
       {"action_id": {"type": "integer"}}, ["action_id"])
 def _cancel_action(args: dict, ctx: ToolContext) -> dict:
-    return reject_action(int(args["action_id"]))
+    return reject_action(int(args["action_id"]), ctx.user_id)
 
 
 # ---------------------------------------------------------------------- memory
@@ -154,14 +159,14 @@ def _cancel_action(args: dict, ctx: ToolContext) -> dict:
        "category": {"type": "string", "enum": ["profile", "preference", "project", "decision", "task", "other"]}},
       ["content"])
 def _remember(args: dict, ctx: ToolContext) -> dict:
-    m = memory.add_memory(args["content"], args.get("category", "other"), source="user")
+    m = memory.add_memory(args["content"], args.get("category", "other"), source="user", user_id=ctx.user_id)
     return {"saved": True, "id": m.id}
 
 
 @tool("search_memory", "Search long-term memory and all past conversations (also weeks or months ago).",
       {"query": {"type": "string"}}, ["query"])
 def _search_memory(args: dict, ctx: ToolContext) -> dict:
-    return memory.search(args["query"])
+    return memory.search(args["query"], user_id=ctx.user_id)
 
 
 # --------------------------------------------------------------------- weather
@@ -176,7 +181,7 @@ WEATHER_CODES = {0: "clear sky", 1: "mainly clear", 2: "partly cloudy", 3: "over
 @tool("get_weather", "Current weather and daily forecast for a city (default: the user's city).",
       {"city": {"type": "string"}, "days": {"type": "integer", "description": "1-7"}})
 def _weather(args: dict, ctx: ToolContext) -> dict:
-    city = args.get("city") or settings.default_city
+    city = args.get("city") or store.get_settings()["city"]
     geo = HTTP.get("https://geocoding-api.open-meteo.com/v1/search",
                    params={"name": city, "count": 1, "language": ctx.language}).json()
     if not geo.get("results"):
@@ -370,7 +375,7 @@ def _route(args: dict, ctx: ToolContext) -> dict:
 def _parse_local(when: str) -> datetime:
     dt = datetime.fromisoformat(when.strip().replace("Z", "+00:00"))
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=ZoneInfo(settings.timezone))
+        dt = dt.replace(tzinfo=ZoneInfo(store.get_settings()["timezone"]))
     return dt.astimezone(timezone.utc)
 
 
@@ -381,17 +386,19 @@ def _parse_local(when: str) -> datetime:
 def _create_reminder(args: dict, ctx: ToolContext) -> dict:
     due = _parse_local(args["due"])
     with SessionLocal() as s:
-        r = Reminder(text=args["text"], due_at=due)
+        r = Reminder(text=args["text"], due_at=due, user_id=ctx.user_id)
         s.add(r)
         s.commit()
-    return {"scheduled": True, "id": r.id, "due_local": due.astimezone(ZoneInfo(settings.timezone)).isoformat()}
+    tz = ZoneInfo(store.get_settings()["timezone"])
+    return {"scheduled": True, "id": r.id, "due_local": due.astimezone(tz).isoformat()}
 
 
 @tool("list_reminders", "List upcoming reminders and appointments.", {})
 def _list_reminders(args: dict, ctx: ToolContext) -> dict:
-    tz = ZoneInfo(settings.timezone)
+    tz = ZoneInfo(store.get_settings()["timezone"])
     with SessionLocal() as s:
-        rows = s.scalars(select(Reminder).where(Reminder.status == "scheduled").order_by(Reminder.due_at)).all()
+        rows = s.scalars(select(Reminder).where(Reminder.status == "scheduled", Reminder.user_id == ctx.user_id)
+                         .order_by(Reminder.due_at)).all()
     return {"reminders": [{"id": r.id, "text": r.text, "due_local": r.due_at.astimezone(tz).isoformat()} for r in rows]}
 
 
@@ -399,7 +406,7 @@ def _list_reminders(args: dict, ctx: ToolContext) -> dict:
 def _cancel_reminder(args: dict, ctx: ToolContext) -> dict:
     with SessionLocal() as s:
         r = s.get(Reminder, int(args["id"]))
-        if not r:
+        if not r or r.user_id != ctx.user_id:
             return {"error": "Reminder not found"}
         r.status = "cancelled"
         s.commit()

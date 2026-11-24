@@ -16,14 +16,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import OperationalError
 
-from . import tools
+from . import store, tools
 from . import voice as fish
+from .accounts import (admin_user, check_password, claim_existing_data, create_user, current_user, hash_password,
+                       issue_token, public, users_exist, valid_password)
 from .agent import ensure_conversation, run_turn, save_message
 from .config import settings
-from .db import (ActivityLog, Conversation, Memory, Message, PendingAction, Reminder, SessionLocal,
+from .db import (ActivityLog, Conversation, Memory, Message, PendingAction, Reminder, SessionLocal, User,
                  init_db, utcnow)
 from .llm import router
 
@@ -44,42 +46,68 @@ except Exception as err:  # the API still starts; /api/health reports the proble
     print(f"[SIMON] database not ready: {err}")
 
 
-# ------------------------------------------------------------------ auth
+# ------------------------------------------------------------------ accounts
 class LoginIn(BaseModel):
+    username: str
     password: str
 
 
-def _require_configured() -> None:
-    """Never run a public deployment with the built-in default password or token secret."""
-    if settings.app_password in ("", "change-me") or settings.jwt_secret in ("", "change-me-too"):
-        raise HTTPException(503, "Login is disabled until APP_PASSWORD and JWT_SECRET are set on the server "
-                                 "(Vercel: Settings → Environment Variables, then redeploy).")
+class SetupIn(BaseModel):
+    username: str
+    password: str
+    display_name: str = ""
 
 
-@app.post("/api/auth/login")
-def login(body: LoginIn):
-    _require_configured()
-    if not hmac.compare_digest(body.password.encode(), settings.app_password.encode()):
-        time.sleep(1)
-        raise HTTPException(401, "Wrong password")
-    token = jwt.encode({"sub": "owner", "exp": utcnow() + timedelta(days=30)}, settings.jwt_secret, "HS256")
-    return {"token": token}
-
-
-def auth(authorization: str = Header(default="")) -> None:
-    if not settings.require_login:
-        return
-    _require_configured()
-    try:
-        jwt.decode(authorization.removeprefix("Bearer ").strip(), settings.jwt_secret, ["HS256"])
-    except jwt.PyJWTError:
-        raise HTTPException(401, "Not logged in")
+class PasswordIn(BaseModel):
+    current: str
+    new: str
 
 
 @app.get("/api/config")
 def public_config():
-    """Tells the web app whether to show the login page."""
-    return {"require_login": settings.require_login}
+    """Tells the web app what to show first: the setup page (no account yet) or the login page."""
+    return {"require_login": True, "setup_needed": not users_exist()}
+
+
+@app.post("/api/auth/setup")
+def setup(body: SetupIn):
+    """Creates the first administrator. Only possible while no account exists."""
+    if users_exist():
+        raise HTTPException(409, "Simon is already set up. Please sign in.")
+    user = create_user(body.username, body.password, body.display_name, role="admin")
+    claim_existing_data(user.id)
+    with SessionLocal() as s:
+        s.get(User, user.id).last_login_at = utcnow()
+        s.commit()
+    return {"token": issue_token(user), "user": public(user)}
+
+
+@app.post("/api/auth/login")
+def login(body: LoginIn):
+    with SessionLocal() as s:
+        user = s.scalar(select(User).where(User.username == body.username.strip().lower()))
+        if not user or not user.active or not check_password(body.password, user.password_hash):
+            time.sleep(1)  # slows down password guessing
+            raise HTTPException(401, "Wrong username or password")
+        user.last_login_at = utcnow()
+        s.commit()
+    return {"token": issue_token(user), "user": public(user)}
+
+
+@app.get("/api/auth/me")
+def whoami(user: User = Depends(current_user)):
+    return public(user)
+
+
+@app.post("/api/auth/password")
+def change_password(body: PasswordIn, user: User = Depends(current_user)):
+    if not check_password(body.current, user.password_hash):
+        raise HTTPException(400, "The current password is not correct")
+    valid_password(body.new)
+    with SessionLocal() as s:
+        s.get(User, user.id).password_hash = hash_password(body.new)
+        s.commit()
+    return {"ok": True}
 
 
 @app.get("/api/health")
@@ -106,10 +134,10 @@ def health():
             "ai_providers": providers, "problems": problems}
 
 
-@app.get("/api/me", dependencies=[Depends(auth)])
-def me():
-    return {"assistant_name": settings.assistant_name, "language": settings.language,
-            "speech_lang": {"de": "de-DE"}.get(settings.language, "en-US")}
+@app.get("/api/me")
+def me(user: User = Depends(current_user)):
+    cfg = store.get_settings()
+    return {**public(user), "assistant_name": cfg["assistant_name"], "language": cfg["language"]}
 
 
 # ------------------------------------------------------------------ chat
@@ -126,35 +154,46 @@ def _sse(events):
         yield f"data: {json.dumps(event, ensure_ascii=False, default=str)}\n\n"
 
 
-@app.post("/api/chat", dependencies=[Depends(auth)])
-def chat(body: ChatIn):
-    conv_id = ensure_conversation(body.conversation_id, body.message or "")
+@app.post("/api/chat")
+def chat(body: ChatIn, user: User = Depends(current_user)):
+    conv_id = ensure_conversation(body.conversation_id, body.message or "", user.id)
 
     def events():
         yield {"type": "conversation", "id": conv_id}
-        yield from run_turn(conv_id, body.message, allow_paid=body.allow_paid, language=body.language, spoken=body.spoken)
+        yield from run_turn(conv_id, body.message, allow_paid=body.allow_paid, language=body.language,
+                            spoken=body.spoken, user_id=user.id, user_name=user.display_name or user.username,
+                            username=user.username)
 
     return StreamingResponse(_sse(events()), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
-@app.get("/api/conversations", dependencies=[Depends(auth)])
-def conversations():
+@app.get("/api/conversations")
+def conversations(user: User = Depends(current_user)):
     with SessionLocal() as s:
-        rows = s.scalars(select(Conversation).order_by(Conversation.updated_at.desc()).limit(100)).all()
+        rows = s.scalars(select(Conversation).where(Conversation.user_id == user.id)
+                         .order_by(Conversation.updated_at.desc()).limit(100)).all()
     return [{"id": c.id, "title": c.title, "updated_at": c.updated_at} for c in rows]
 
 
-@app.get("/api/conversations/{conv_id}", dependencies=[Depends(auth)])
-def conversation(conv_id: int):
+@app.get("/api/conversations/{conv_id}")
+def conversation(conv_id: int, user: User = Depends(current_user)):
+    with SessionLocal() as s:
+        conv = s.get(Conversation, conv_id)
+        if not conv or conv.user_id != user.id:
+            raise HTTPException(404, "Conversation not found")
     with SessionLocal() as s:
         rows = s.scalars(select(Message).where(Message.conversation_id == conv_id).order_by(Message.id)).all()
     return [{"id": m.id, "role": m.role, "content": m.content, "provider": m.provider, "model": m.model,
              "cards": (m.meta or {}).get("cards", []), "created_at": m.created_at} for m in rows]
 
 
-@app.delete("/api/conversations/{conv_id}", dependencies=[Depends(auth)])
-def delete_conversation(conv_id: int):
+@app.delete("/api/conversations/{conv_id}")
+def delete_conversation(conv_id: int, user: User = Depends(current_user)):
+    with SessionLocal() as s:
+        conv = s.get(Conversation, conv_id)
+        if not conv or conv.user_id != user.id:
+            raise HTTPException(404, "Conversation not found")
     with SessionLocal() as s:
         s.execute(delete(Message).where(Message.conversation_id == conv_id))
         s.execute(delete(Conversation).where(Conversation.id == conv_id))
@@ -168,10 +207,10 @@ class MemoryIn(BaseModel):
     category: str = "other"
 
 
-@app.get("/api/memories", dependencies=[Depends(auth)])
-def memories(q: str = ""):
+@app.get("/api/memories")
+def memories(q: str = "", user: User = Depends(current_user)):
     with SessionLocal() as s:
-        stmt = select(Memory).order_by(Memory.updated_at.desc())
+        stmt = select(Memory).where(Memory.user_id == user.id).order_by(Memory.updated_at.desc())
         if q:
             stmt = stmt.where(Memory.content.ilike(f"%{q}%"))
         rows = s.scalars(stmt).all()
@@ -179,39 +218,39 @@ def memories(q: str = ""):
              "updated_at": m.updated_at} for m in rows]
 
 
-@app.post("/api/memories", dependencies=[Depends(auth)])
-def add_memory(body: MemoryIn):
+@app.post("/api/memories")
+def add_memory(body: MemoryIn, user: User = Depends(current_user)):
     with SessionLocal() as s:
-        m = Memory(content=body.content, category=body.category, source="user")
+        m = Memory(content=body.content, category=body.category, source="user", user_id=user.id)
         s.add(m)
         s.commit()
         return {"id": m.id}
 
 
-@app.put("/api/memories/{mem_id}", dependencies=[Depends(auth)])
-def update_memory(mem_id: int, body: MemoryIn):
+@app.put("/api/memories/{mem_id}")
+def update_memory(mem_id: int, body: MemoryIn, user: User = Depends(current_user)):
     with SessionLocal() as s:
         m = s.get(Memory, mem_id)
-        if not m:
+        if not m or m.user_id != user.id:
             raise HTTPException(404)
         m.content, m.category, m.updated_at = body.content, body.category, utcnow()
         s.commit()
     return {"ok": True}
 
 
-@app.delete("/api/memories/{mem_id}", dependencies=[Depends(auth)])
-def delete_memory(mem_id: int):
+@app.delete("/api/memories/{mem_id}")
+def delete_memory(mem_id: int, user: User = Depends(current_user)):
     with SessionLocal() as s:
-        s.execute(delete(Memory).where(Memory.id == mem_id))
+        s.execute(delete(Memory).where(Memory.id == mem_id, Memory.user_id == user.id))
         s.commit()
     return {"deleted": True}
 
 
 # ------------------------------------------------------------------ approvals
-@app.get("/api/actions", dependencies=[Depends(auth)])
-def actions(status: str = "pending"):
+@app.get("/api/actions")
+def actions(status: str = "pending", user: User = Depends(current_user)):
     with SessionLocal() as s:
-        rows = s.scalars(select(PendingAction).where(PendingAction.status == status)
+        rows = s.scalars(select(PendingAction).where(PendingAction.status == status, PendingAction.user_id == user.id)
                          .order_by(PendingAction.id.desc()).limit(50)).all()
     return [{"id": a.id, "summary": a.summary, "tool": a.tool, "args": a.args, "status": a.status,
              "created_at": a.created_at} for a in rows]
@@ -227,55 +266,62 @@ def _record_decision(result: dict) -> dict:
     return result
 
 
-@app.post("/api/actions/{action_id}/approve", dependencies=[Depends(auth)])
-def approve(action_id: int):
-    result = tools.execute_action(action_id)
+@app.post("/api/actions/{action_id}/approve")
+def approve(action_id: int, user: User = Depends(current_user)):
+    result = tools.execute_action(action_id, user.id)
     if "error" in result:
         raise HTTPException(400, result["error"])
     return _record_decision(result)
 
 
-@app.post("/api/actions/{action_id}/reject", dependencies=[Depends(auth)])
-def reject(action_id: int):
-    result = tools.reject_action(action_id)
+@app.post("/api/actions/{action_id}/reject")
+def reject(action_id: int, user: User = Depends(current_user)):
+    result = tools.reject_action(action_id, user.id)
     if "error" in result:
         raise HTTPException(400, result["error"])
     return _record_decision(result)
 
 
 # ------------------------------------------------------------------ activity / providers
-@app.get("/api/activity", dependencies=[Depends(auth)])
-def activity(limit: int = 100):
+@app.get("/api/activity")
+def activity(limit: int = 100, user: User = Depends(current_user)):
+    """The user's own steps plus system events (provider switches, voice fallbacks)."""
     with SessionLocal() as s:
-        rows = s.scalars(select(ActivityLog).order_by(ActivityLog.id.desc()).limit(min(limit, 500))).all()
+        rows = s.scalars(select(ActivityLog).where(or_(ActivityLog.user_id == user.id, ActivityLog.user_id.is_(None)))
+                         .order_by(ActivityLog.id.desc()).limit(min(limit, 500))).all()
     return [{"id": a.id, "at": a.created_at, "kind": a.kind, "summary": a.summary, "detail": a.detail} for a in rows]
 
 
-@app.get("/api/providers", dependencies=[Depends(auth)])
-def providers():
+@app.get("/api/providers")
+def providers(user: User = Depends(current_user)):
     return router.status()
 
 
-@app.get("/api/stats", dependencies=[Depends(auth)])
-def stats():
-    """Numbers for the dashboard (telemetry gauges and status pills), read from the database."""
+@app.get("/api/stats")
+def stats(user: User = Depends(current_user)):
+    """Numbers for the dashboard (telemetry gauges and status pills) for this user."""
+    uid = user.id
     with SessionLocal() as s:
         def count(model, *where):
             return s.scalar(select(func.count(model.id)).where(*where)) or 0
 
-        kinds = dict(s.execute(select(ActivityLog.kind, func.count(ActivityLog.id)).group_by(ActivityLog.kind)).all())
+        mine = select(Conversation.id).where(Conversation.user_id == uid)
+        kinds = dict(s.execute(select(ActivityLog.kind, func.count(ActivityLog.id))
+                               .where(or_(ActivityLog.user_id == uid, ActivityLog.user_id.is_(None)))
+                               .group_by(ActivityLog.kind)).all())
         by_provider = dict(s.execute(
             select(Message.provider, func.count(Message.id))
-            .where(Message.role == "assistant", Message.provider.is_not(None))
+            .where(Message.role == "assistant", Message.provider.is_not(None), Message.conversation_id.in_(mine))
             .group_by(Message.provider)).all())
-        last = s.scalars(select(Message).where(Message.role == "assistant", Message.provider.is_not(None))
+        last = s.scalars(select(Message).where(Message.role == "assistant", Message.provider.is_not(None),
+                                               Message.conversation_id.in_(mine))
                          .order_by(Message.id.desc()).limit(1)).first()
         out = {
-            "conversations": count(Conversation),
-            "questions": count(Message, Message.role == "user"),
-            "memories": count(Memory),
-            "reminders": count(Reminder, Reminder.status == "scheduled"),
-            "pending_actions": count(PendingAction, PendingAction.status == "pending"),
+            "conversations": count(Conversation, Conversation.user_id == uid),
+            "questions": count(Message, Message.role == "user", Message.conversation_id.in_(mine)),
+            "memories": count(Memory, Memory.user_id == uid),
+            "reminders": count(Reminder, Reminder.status == "scheduled", Reminder.user_id == uid),
+            "pending_actions": count(PendingAction, PendingAction.status == "pending", PendingAction.user_id == uid),
             "last_provider": last.provider if last else None,
             "last_model": last.model if last else None,
         }
@@ -296,18 +342,19 @@ def stats():
 
 
 # ------------------------------------------------------------------ reminders
-@app.get("/api/reminders", dependencies=[Depends(auth)])
-def reminders():
+@app.get("/api/reminders")
+def reminders(user: User = Depends(current_user)):
     with SessionLocal() as s:
-        rows = s.scalars(select(Reminder).where(Reminder.status == "scheduled").order_by(Reminder.due_at)).all()
+        rows = s.scalars(select(Reminder).where(Reminder.status == "scheduled", Reminder.user_id == user.id)
+                         .order_by(Reminder.due_at)).all()
     return [{"id": r.id, "text": r.text, "due_at": r.due_at} for r in rows]
 
 
-@app.get("/api/notifications", dependencies=[Depends(auth)])
-def notifications():
-    """Polled by every open device; returns reminders that are due."""
+@app.get("/api/notifications")
+def notifications(user: User = Depends(current_user)):
+    """Polled by every open device of this user; returns their reminders that are due."""
     with SessionLocal() as s:
-        rows = s.scalars(select(Reminder).where(Reminder.status.in_(["scheduled", "fired"]),
+        rows = s.scalars(select(Reminder).where(Reminder.status.in_(["scheduled", "fired"]), Reminder.user_id == user.id,
                                                 Reminder.due_at <= utcnow())).all()
         for r in rows:
             r.status = "fired"
@@ -315,11 +362,11 @@ def notifications():
     return [{"id": r.id, "text": r.text, "due_at": r.due_at} for r in rows]
 
 
-@app.post("/api/reminders/{rem_id}/done", dependencies=[Depends(auth)])
-def reminder_done(rem_id: int):
+@app.post("/api/reminders/{rem_id}/done")
+def reminder_done(rem_id: int, user: User = Depends(current_user)):
     with SessionLocal() as s:
         r = s.get(Reminder, rem_id)
-        if r:
+        if r and r.user_id == user.id:
             r.status = "done"
             s.commit()
     return {"ok": True}
@@ -334,19 +381,22 @@ class TTSIn(BaseModel):
     speed: float | None = None  # 0.82 calm, 0.9 normal, 1.0 brisk
 
 
-@app.get("/api/voices", dependencies=[Depends(auth)])
-def voices():
-    return fish.catalogue()
+@app.get("/api/voices")
+def voices(user: User = Depends(current_user)):
+    cfg = store.get_settings()
+    return {**fish.catalogue(), "default_de": cfg["voice_de"], "default_en": cfg["voice_en"],
+            "default_speed": cfg["speed"]}
 
 
-@app.post("/api/tts", dependencies=[Depends(auth)])
-async def tts(body: TTSIn):
+@app.post("/api/tts")
+async def tts(body: TTSIn, user: User = Depends(current_user)):
     """German and English: Fish Audio (free model), streamed as raw PCM so playback starts at once.
     Whenever Fish is not usable: the standard voice (edge-tts) as one MP3."""
     lang = settings.lang(body.lang)
     text = fish.pronounce(body.text[:4000], lang)
-    choice = fish.pick(lang, body.voice_key)
-    speed = fish.speed_of(body.speed)
+    cfg = store.get_settings()  # the administrator's defaults when the device has not chosen
+    choice = fish.pick(lang, body.voice_key or cfg[f"voice_{lang}"])
+    speed = fish.speed_of(body.speed or cfg["speed"])
     if not body.voice and choice["fish"] and fish.fish_enabled(lang):
         opened = await fish.fish_stream(text, lang, choice["fish"], speed)
         if opened:
@@ -370,8 +420,8 @@ async def tts(body: TTSIn):
     return Response(bytes(audio), media_type="audio/mpeg", headers={"X-TTS-Engine": "edge"})
 
 
-@app.post("/api/stt", dependencies=[Depends(auth)])
-async def stt(file: UploadFile = File(...), language: str | None = Form(None)):
+@app.post("/api/stt")
+async def stt(file: UploadFile = File(...), language: str | None = Form(None), user: User = Depends(current_user)):
     """Fallback speech-to-text for browsers without built-in recognition (FreeLLMAPI or Groq Whisper)."""
     client = router.stt_client()
     if not client:
@@ -381,6 +431,93 @@ async def stt(file: UploadFile = File(...), language: str | None = Form(None)):
                                      file=(file.filename or "audio.webm", data),
                                      language=settings.lang(language))
     return {"text": result.text}
+
+
+# ------------------------------------------------------------------ administration
+class UserIn(BaseModel):
+    username: str
+    password: str
+    display_name: str = ""
+    role: str = "user"
+
+
+class UserPatch(BaseModel):
+    display_name: str | None = None
+    role: str | None = None
+    active: bool | None = None
+    password: str | None = None
+
+
+def _admins_left(s, without: int) -> int:
+    return s.scalar(select(func.count(User.id)).where(User.role == "admin", User.active.is_(True), User.id != without)) or 0
+
+
+@app.get("/api/admin/users")
+def admin_list_users(admin: User = Depends(admin_user)):
+    with SessionLocal() as s:
+        users = s.scalars(select(User).order_by(User.created_at)).all()
+        convs = dict(s.execute(select(Conversation.user_id, func.count(Conversation.id)).group_by(Conversation.user_id)).all())
+        mems = dict(s.execute(select(Memory.user_id, func.count(Memory.id)).group_by(Memory.user_id)).all())
+    return [{**public(u), "conversations": convs.get(u.id, 0), "memories": mems.get(u.id, 0)} for u in users]
+
+
+@app.post("/api/admin/users")
+def admin_create_user(body: UserIn, admin: User = Depends(admin_user)):
+    return public(create_user(body.username, body.password, body.display_name, body.role))
+
+
+@app.patch("/api/admin/users/{user_id}")
+def admin_update_user(user_id: int, body: UserPatch, admin: User = Depends(admin_user)):
+    with SessionLocal() as s:
+        u = s.get(User, user_id)
+        if not u:
+            raise HTTPException(404, "User not found")
+        losing_admin = (body.role == "user" and u.role == "admin") or (body.active is False and u.role == "admin")
+        if losing_admin and _admins_left(s, u.id) == 0:
+            raise HTTPException(400, "At least one active administrator must remain")
+        if body.display_name is not None:
+            u.display_name = body.display_name.strip()[:120] or u.username
+        if body.role in ("admin", "user"):
+            u.role = body.role
+        if body.active is not None:
+            u.active = body.active
+        if body.password:
+            u.password_hash = hash_password(valid_password(body.password))
+        s.commit()
+        return public(u)
+
+
+@app.delete("/api/admin/users/{user_id}")
+def admin_delete_user(user_id: int, admin: User = Depends(admin_user)):
+    """Deletes the account and everything that belongs to it (conversations, memory, reminders)."""
+    if user_id == admin.id:
+        raise HTTPException(400, "You cannot delete your own account")
+    with SessionLocal() as s:
+        u = s.get(User, user_id)
+        if not u:
+            raise HTTPException(404, "User not found")
+        if u.role == "admin" and _admins_left(s, u.id) == 0:
+            raise HTTPException(400, "At least one active administrator must remain")
+        conv_ids = select(Conversation.id).where(Conversation.user_id == user_id)
+        s.execute(delete(Message).where(Message.conversation_id.in_(conv_ids)))
+        for model in (Conversation, Memory, Reminder, PendingAction, ActivityLog):
+            s.execute(delete(model).where(model.user_id == user_id))
+        s.delete(u)
+        s.commit()
+    return {"deleted": True}
+
+
+@app.get("/api/admin/settings")
+def admin_get_settings(admin: User = Depends(admin_user)):
+    return {"settings": store.get_settings(), "voices": fish.catalogue()}
+
+
+@app.put("/api/admin/settings")
+def admin_save_settings(body: dict, admin: User = Depends(admin_user)):
+    try:
+        return {"settings": store.save_settings(body), "voices": fish.catalogue()}
+    except ValueError as err:
+        raise HTTPException(400, str(err))
 
 
 # ------------------------------------------------------------------ frontend

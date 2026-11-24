@@ -141,6 +141,7 @@ export default function Sphere({ state = 'idle' }) {
     mo.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] })
 
     const fit = () => {
+      if (!wrapRef.current) return // already removed from the page
       const r = wrapRef.current.getBoundingClientRect()
       dpr = Math.min(window.devicePixelRatio || 1, 2)
       W = Math.max(1, Math.floor(r.width))

@@ -21,7 +21,9 @@ async function check(res) {
   if (!res.ok) {
     const body = await res.json().catch(() => ({}))
     // HTTP/2 hosts (Vercel) send no status text, so always fall back to a readable message.
-    throw new Error(body.detail || res.statusText || `The server had a problem (error ${res.status}). Please try again.`)
+    const err = new Error(body.detail || res.statusText || `The server had a problem (error ${res.status}). Please try again.`)
+    err.status = res.status // lets the app show its own, translated message
+    throw err
   }
   return res
 }
@@ -31,15 +33,23 @@ export async function api(path, { method = 'GET', body } = {}) {
   return res.json()
 }
 
-export async function login(password) {
-  const res = await fetch('/api/auth/login', { method: 'POST', headers: headers(), body: JSON.stringify({ password }) })
+async function signIn(path, payload) {
+  const res = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
   if (!res.ok) {
     const body = await res.json().catch(() => ({}))
-    throw new Error(res.status === 401 ? 'Wrong password' : body.detail || 'Login failed')
+    const err = new Error(body.detail || 'Login failed')
+    err.status = res.status
+    throw err
   }
-  const { token } = await res.json()
+  const { token, user } = await res.json()
   setToken(token)
+  return user
 }
+
+/** Sign in with username and password. */
+export const login = (username, password) => signIn('/api/auth/login', { username, password })
+/** First start: creates the administrator account (only while no account exists). */
+export const setupAdmin = (username, password, display_name) => signIn('/api/auth/setup', { username, password, display_name })
 
 /** POST /api/chat and call onEvent for every server-sent event. */
 export async function streamChat(body, onEvent, signal) {
