@@ -22,6 +22,7 @@ checked without it.
 | The sphere (size, number of nodes and lines, glitter, rays, rotation speed, light pulses) | `frontend/src/Sphere.jsx` | the `SPHERE` block at the top; every value has a comment |
 | The sphere's colours | `frontend/src/Sphere.jsx` | `SPHERE.dark` and `SPHERE.light` (RGB values) |
 | How strongly the sphere reacts to the voice | `frontend/src/voice.js` | `voiceLevel()` (your formula: bins 4–64, ×2.4, threshold 0.06, max 0.7) |
+| When talking over Simon counts as an interruption | `frontend/src/voice.js` | the `BARGE_IN` block (how long and how loud the user must speak, how long a pause ends the sentence) |
 | Interface colours (background, panels, accent) | `frontend/src/styles.css` | the colour tokens at the top: `:root` = light theme, `:root[data-theme="dark"]` = dark theme |
 | Any text, in German or English | `frontend/src/i18n.js` | `DE` and `EN` lists; the key on the left must stay the same |
 | Start in German or English | `frontend/src/i18n.js` | the line `return 'de'` near the top |
@@ -43,6 +44,20 @@ checked without it.
 
 The value that drives it is `target` (0 to 0.7), read from Simon's real voice through the Web
 Audio analyser in `voice.js`, exactly as described in your sphere specification.
+
+## Interrupting Simon (barge-in)
+
+While Simon speaks, the microphone stays open (with the browser's echo cancellation). When you talk over
+him for about a quarter of a second, he stops at once, records what you say until a short pause, and
+answers it. He is told how much of his previous answer you heard, so he does not repeat it and can carry
+on from there ("go on", "and the price?"). The switch **Unterbrechen / Interrupt** under the input turns it
+off; tapping the sphere still stops him at any time.
+
+If a device stops Simon by itself (his own voice comes back through the microphone) or does not react
+to you, tune it there: open the browser console and run `localStorage.simon_barge_debug = '1'`, reload,
+let Simon speak, then look at `window.__bargeLog` (`mic` = your level, `threshold` = what is needed,
+`simon` = his loudness). Raise `minLevel` or `overEcho` in `BARGE_IN` if he stops by himself, lower them
+if he does not hear you. Headphones avoid the echo completely.
 
 ## Publishing a change
 

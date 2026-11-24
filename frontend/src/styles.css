@@ -236,6 +236,7 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); }
 @keyframes rise { from { opacity: 0; transform: translateY(4px); } }
 .meta { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; font: 9.5px var(--mono); letter-spacing: .18em; text-transform: uppercase; color: var(--ink-3); min-height: 26px; }
 .meta-name { color: var(--hud-text); font-weight: 500; }
+.cut-tag { color: var(--amber, #e0b062); }
 .replay { width: 26px; height: 26px; display: grid; place-items: center; border-radius: 4px; color: var(--ink-3); }
 .replay:hover { color: var(--hud-text); background: var(--panel-2); }
 .prose { font-size: 16px; line-height: 1.65; overflow-wrap: anywhere; }

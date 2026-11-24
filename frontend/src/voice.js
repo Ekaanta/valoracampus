@@ -360,6 +360,7 @@ export function createSpeaker(lang, { onStart, onSentence } = {}) {
   function finish() {
     if (finished) return
     finished = true
+    speaker.finished = true
     if (active === speaker) active = null
     resolveDone()
   }
@@ -374,4 +375,178 @@ export function speak(text, lang, callbacks) {
   speaker.push(text)
   speaker.end()
   return speaker.done
+}
+
+/* ---------------------------------------------------------------- interrupting Simon (barge-in)
+ * While Simon speaks, the microphone stays open. When the user talks over him, he stops at once and
+ * the user's words are recorded until a short pause (with the moment before the detection, so the
+ * first word is not lost), then written out on the server (Whisper) and answered.
+ * The browser's echo cancellation removes most of Simon's own voice from the microphone. What is left
+ * is compared with how loud Simon is right now, so his own voice does not count as the user talking.
+ * The numbers below can be tuned without touching the logic (louder room: raise minLevel).
+ */
+export const BARGE_IN = {
+  startMs: 260, // this much clear speech over Simon counts as an interruption
+  endSilenceMs: 800, // the user has finished after this much quiet
+  maxMs: 15000, // longest recording
+  preRollMs: 500, // kept from just before the detection
+  warmupMs: 450, // the first moments only learn the room noise and the echo
+  minLevel: 0.012, // the quietest level (RMS, 0 to 1) that can count as speech
+  overNoise: 3, // speech must be this many times louder than the room noise ...
+  overEcho: 2.4, // ... and this many times louder than what is left of Simon's voice
+}
+
+export const bargeInSupported = () => typeof window !== 'undefined'
+  && !!(navigator.mediaDevices?.getUserMedia && (window.AudioContext || window.webkitAudioContext))
+
+let outBuf = null
+/** How loud Simon's voice leaves the speakers right now (RMS, 0 to 1). */
+function outputLevel() {
+  if (browserVoice) return 0.15 // the browser's own voice cannot be measured: assume a normal level
+  if (!analyser) return 0
+  if (!outBuf || outBuf.length !== analyser.fftSize) outBuf = new Uint8Array(analyser.fftSize)
+  analyser.getByteTimeDomainData(outBuf)
+  let s = 0
+  for (let i = 0; i < outBuf.length; i++) { const v = (outBuf[i] - 128) / 128; s += v * v }
+  return Math.sqrt(s / outBuf.length)
+}
+
+/** 16 kHz mono 16-bit WAV (what speech recognition expects) from microphone frames at `rate`. */
+function toWav(frames, rate) {
+  const total = frames.reduce((n, f) => n + f.length, 0)
+  const all = new Float32Array(total)
+  let o = 0
+  for (const f of frames) { all.set(f, o); o += f.length }
+  let peak = 0
+  for (let i = 0; i < total; i++) peak = Math.max(peak, Math.abs(all[i]))
+  const gain = peak > 0 ? Math.min(20, 0.9 / peak) : 1 // recorded without automatic gain: make it clearly audible
+  const step = rate / 16000
+  const n = Math.floor(total / step)
+  const view = new DataView(new ArrayBuffer(44 + n * 2))
+  const text = (at, s) => { for (let i = 0; i < s.length; i++) view.setUint8(at + i, s.charCodeAt(i)) }
+  text(0, 'RIFF'); view.setUint32(4, 36 + n * 2, true); text(8, 'WAVE'); text(12, 'fmt ')
+  view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true)
+  view.setUint32(24, 16000, true); view.setUint32(28, 32000, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true)
+  text(36, 'data'); view.setUint32(40, n * 2, true)
+  for (let i = 0; i < n; i++) { // average over each step: a simple filter against aliasing
+    const a = Math.floor(i * step)
+    const b = Math.max(a + 1, Math.min(total, Math.floor((i + 1) * step)))
+    let s = 0
+    for (let j = a; j < b; j++) s += all[j]
+    const v = Math.max(-1, Math.min(1, (s / (b - a)) * gain))
+    view.setInt16(44 + i * 2, v < 0 ? v * 0x8000 : v * 0x7fff, true)
+  }
+  return new Blob([view.buffer], { type: 'audio/wav' })
+}
+
+/**
+ * Watches the microphone while Simon speaks. onStart() fires the moment the user talks over him,
+ * onUtterance(wavBlob) when they have finished. Resolves with { close(), finish(), talking },
+ * or null when the microphone is not available (then Simon can still be stopped by tapping).
+ */
+export async function createBargeIn({ onStart, onUtterance }) {
+  if (!ctx || !bargeInSupported()) return null
+  let stream
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      // No automatic gain: it would raise what is left of Simon's echo until it sounds like the user.
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false, channelCount: 1 },
+    })
+  } catch { return null }
+  const B = BARGE_IN
+  const rate = ctx.sampleRate
+  const size = 2048
+  const frameMs = (size / rate) * 1000
+  const mic = ctx.createMediaStreamSource(stream)
+  const proc = ctx.createScriptProcessor(size, 1, 1)
+  const mute = ctx.createGain()
+  mute.gain.value = 0 // the processor only runs when connected to the output; nothing is heard
+  mic.connect(proc)
+  proc.connect(mute)
+  mute.connect(ctx.destination)
+
+  // For tuning on a real device: localStorage.simon_barge_debug = '1' keeps every measurement in window.__bargeLog
+  let debug = false
+  try { debug = localStorage.getItem('simon_barge_debug') === '1' } catch { /* private mode */ }
+  if (debug) window.__bargeLog = []
+  const opened = performance.now()
+  let state = 'watch' // watch -> talking -> done
+  let floor = null // room noise
+  let echo = 0.25 // how much of Simon's voice reaches the microphone after echo cancellation
+  let outHold = 0 // Simon's recent loudness (his echo arrives a little later than the sound leaves)
+  let run = 0 // consecutive frames of speech
+  let gaps = 0
+  let quietMs = 0
+  let frames = [] // pre-roll while watching, the recording while talking
+  let length = 0
+
+  const close = () => {
+    if (state === 'done') return
+    state = 'done'
+    proc.onaudioprocess = null
+    try { mic.disconnect(); proc.disconnect(); mute.disconnect() } catch { /* already disconnected */ }
+    stream.getTracks().forEach((tr) => tr.stop())
+  }
+  const finish = () => {
+    if (state !== 'talking') return
+    const recorded = frames
+    close()
+    onUtterance?.(toWav(recorded, rate))
+  }
+
+  proc.onaudioprocess = (e) => {
+    if (state === 'done') return
+    const x = new Float32Array(e.inputBuffer.getChannelData(0)) // a copy: the browser reuses the buffer
+    let s = 0
+    for (let i = 0; i < x.length; i++) s += x[i] * x[i]
+    const r = Math.sqrt(s / x.length)
+    frames.push(x)
+    length += x.length
+
+    if (state === 'talking') {
+      const quiet = r < Math.max(B.minLevel * 0.8, floor * 2)
+      quietMs = quiet ? quietMs + frameMs : 0
+      if (quietMs >= B.endSilenceMs || (length / rate) * 1000 >= B.maxMs) finish()
+      return
+    }
+
+    // watching: keep only the last moments as pre-roll
+    const keep = Math.ceil((B.preRollMs / 1000) * rate)
+    while (length - frames[0].length >= keep) length -= frames.shift().length
+    outHold = Math.max(outputLevel(), outHold * 0.8)
+    if (floor === null) floor = r
+    const threshold = Math.max(B.minLevel, floor * B.overNoise, echo * outHold * B.overEcho)
+    const loud = r > threshold
+    if (debug) {
+      window.__bargeLog.push({ ms: Math.round(performance.now() - opened), mic: +r.toFixed(4), threshold: +threshold.toFixed(4),
+        simon: +outHold.toFixed(3), echo: +echo.toFixed(3), noise: +floor.toFixed(4) })
+    }
+    if (performance.now() - opened < B.warmupMs) { // learn only
+      floor = Math.min(floor, r)
+      if (outHold > 0.02) echo = Math.min(1.5, Math.max(echo * 0.9, r / outHold))
+      return
+    }
+    if (!loud) { // learn the room and the echo from moments without the user's voice
+      floor = r < floor ? floor * 0.7 + r * 0.3 : floor * 0.98 + r * 0.02
+      if (outHold > 0.02) {
+        const seen = r / outHold
+        echo = Math.min(1.5, echo + (seen - echo) * (seen > echo ? 0.2 : 0.02))
+      }
+    }
+    if (loud) { run++; gaps = 0 } else if (run && ++gaps > 1) { run = 0; gaps = 0 }
+    if (run * frameMs >= B.startMs) {
+      state = 'talking'
+      quietMs = 0
+      onStart?.()
+    }
+  }
+
+  return { close, finish, get talking() { return state === 'talking' } }
+}
+
+/** Whisper writes subtitle credits for noise ("Untertitel im Auftrag des ZDF"); those are not the user. */
+export function realSpeech(text) {
+  const t = (text || '').toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim()
+  if (t.length < 2) return false
+  return !/untertitel|amara org|im auftrag des|fürs zuschauen|for watching|abonnier|subscribe/.test(t)
 }

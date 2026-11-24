@@ -68,6 +68,34 @@ VOICE_RULE = ("\n\nThe user asked by voice and will HEAR your answer: reply in a
               "style, and round numbers the way people say them (\"about fifty-five thousand euros\").")
 
 
+INTERRUPTED = ("\n\nThe user just interrupted your previous spoken answer by talking over you. {heard} "
+               "Do not repeat what they already heard and do not apologise at length. Answer what they say now; "
+               "if it continues your unfinished answer (\"go on\", \"and the price?\"), pick up exactly where "
+               "you stopped.")
+
+
+def _interrupted_note(heard: str | None) -> str:
+    if heard is None:
+        return ""
+    heard = " ".join(heard.split())
+    if not heard:
+        return INTERRUPTED.format(heard="They heard nothing of it: you were stopped as you started to speak.")
+    if len(heard) > 700:
+        heard = "… " + heard[-700:]
+    return INTERRUPTED.format(heard=f'They heard only this part of it, the last sentence perhaps only '
+                                    f'partly: "{heard}"')
+
+
+def _close_interrupted(conversation_id: int, heard: str) -> None:
+    """The interrupted answer was never finished: keep what the user heard of it, so the history stays in order."""
+    with SessionLocal() as s:
+        last = s.scalars(select(Message).where(Message.conversation_id == conversation_id)
+                         .order_by(Message.id.desc())).first()
+    if last and last.role == "user":
+        text = " ".join(heard.split())
+        save_message(conversation_id, "assistant", f"{text} …" if text else "…", meta={"interrupted": True})
+
+
 def _system_prompt(lang: str, spoken: bool = False, user_id: int | None = None, user_name: str = "the user",
                    username: str = "") -> str:
     cfg = store.get_settings()  # what the administrator set in the app
@@ -124,12 +152,17 @@ def save_message(conversation_id: int, role: str, content: str, **extra) -> int:
 
 def run_turn(conversation_id: int, user_text: str | None, allow_paid: bool = False,
              language: str | None = None, spoken: bool = False, user_id: int | None = None,
-             user_name: str = "the user", username: str = "") -> Iterator[dict]:
-    """Streams UI events: provider, token, tool, chart/link/approval cards, paid_required, error, done."""
+             user_name: str = "the user", username: str = "", interrupted: str | None = None) -> Iterator[dict]:
+    """Streams UI events: provider, token, tool, chart/link/approval cards, paid_required, error, done.
+
+    interrupted: the user talked over the previous spoken answer; this is the part of it they heard.
+    """
     lang = settings.lang(language)
     say = TEXT[lang]
     turn_started = utcnow()
     if user_text is not None:
+        if interrupted is not None:
+            _close_interrupted(conversation_id, interrupted)
         save_message(conversation_id, "user", user_text)
     else:  # retry of the last user message (e.g. after approving a paid provider)
         with SessionLocal() as s:
@@ -137,8 +170,8 @@ def run_turn(conversation_id: int, user_text: str | None, allow_paid: bool = Fal
                                                    Message.role == "user").order_by(Message.id.desc())).first()
         user_text = last.content if last else ""
 
-    messages = ([{"role": "system", "content": _system_prompt(lang, spoken, user_id, user_name, username)}]
-                + _history(conversation_id))
+    system = _system_prompt(lang, spoken, user_id, user_name, username) + _interrupted_note(interrupted)
+    messages = [{"role": "system", "content": system}] + _history(conversation_id)
     ctx = ToolContext(conversation_id=conversation_id, user_message=user_text, turn_started_at=turn_started,
                       language=lang, user_id=user_id)
     answer, cards, provider = "", [], None

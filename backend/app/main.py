@@ -15,7 +15,7 @@ from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadF
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import OperationalError
 
@@ -162,6 +162,8 @@ class ChatIn(BaseModel):
     allow_paid: bool = False  # True only after the user approved the paid provider in the UI
     language: str | None = None  # "de" | "en": interface language of the device
     spoken: bool = False  # the answer will be read aloud: keep it short
+    # The user talked over Simon's previous spoken answer: the part they heard before that ("" = nothing)
+    interrupted: str | None = Field(None, max_length=8000)
 
 
 def _sse(events):
@@ -177,7 +179,7 @@ def chat(body: ChatIn, user: User = Depends(current_user)):
         yield {"type": "conversation", "id": conv_id}
         yield from run_turn(conv_id, body.message, allow_paid=body.allow_paid, language=body.language,
                             spoken=body.spoken, user_id=user.id, user_name=user.display_name or user.username,
-                            username=user.username)
+                            username=user.username, interrupted=body.interrupted)
 
     return StreamingResponse(_sse(events()), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
@@ -200,7 +202,8 @@ def conversation(conv_id: int, user: User = Depends(current_user)):
     with SessionLocal() as s:
         rows = s.scalars(select(Message).where(Message.conversation_id == conv_id).order_by(Message.id)).all()
     return [{"id": m.id, "role": m.role, "content": m.content, "provider": m.provider, "model": m.model,
-             "cards": (m.meta or {}).get("cards", []), "created_at": m.created_at} for m in rows]
+             "cards": (m.meta or {}).get("cards", []), "interrupted": bool((m.meta or {}).get("interrupted")),
+             "created_at": m.created_at} for m in rows]
 
 
 @app.delete("/api/conversations/{conv_id}")
