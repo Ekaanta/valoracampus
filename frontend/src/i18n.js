@@ -162,6 +162,10 @@ const EN = {
   f_lang: 'Default language', f_voice_de: 'Default German voice', f_voice_en: 'Default English voice',
   f_persona: 'Extra instructions for Simon', personaHint: 'For example: tone, how to address people, facts about the household or company.',
   saveSettings: 'Save settings', saved: 'Saved.',
+  signupLink: 'No account yet? Sign up', haveAccount: 'I already have an account', signupTitle: 'Create your account',
+  signupSub: 'Your own Simon account, with your own conversations and memory.',
+  signupOff: 'Sign-up is switched off. Please ask the administrator for an account.',
+  f_signup: 'Allow people to create their own account on the login page',
 }
 
 const DE = {
@@ -274,6 +278,10 @@ const DE = {
   f_lang: 'Standardsprache', f_voice_de: 'Standardstimme Deutsch', f_voice_en: 'Standardstimme Englisch',
   f_persona: 'Zusätzliche Anweisungen für Simon', personaHint: 'Zum Beispiel: Tonfall, wie Simon Personen ansprechen soll, Fakten über Haushalt oder Firma.',
   saveSettings: 'Einstellungen speichern', saved: 'Gespeichert.',
+  signupLink: 'Noch kein Konto? Jetzt registrieren', haveAccount: 'Ich habe schon ein Konto', signupTitle: 'Konto erstellen',
+  signupSub: 'Ihr eigenes Simon-Konto, mit eigenen Gesprächen und eigenem Gedächtnis.',
+  signupOff: 'Die Registrierung ist ausgeschaltet. Bitte den Administrator um ein Konto bitten.',
+  f_signup: 'Personen dürfen sich auf der Anmeldeseite selbst ein Konto anlegen',
 }
 
 const STR = { en: EN, de: DE }

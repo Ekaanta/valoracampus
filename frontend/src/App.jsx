@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { api, getToken, login, setupAdmin, streamChat } from './api.js'
+import { api, getToken, login, setupAdmin, signUp, streamChat } from './api.js'
 import { createSpeaker, listen, setVoicePrefs, speak, stopSpeaking, unlockAudio, voicePrefs } from './voice.js'
 import { AccountPanel, ActivityPanel, AdminPanel, HistoryPanel, MemoryPanel, SystemsPanel } from './panels.jsx'
 import { Brain, Feed, Panel, ProviderList, Sessions, Telemetry } from './hud.jsx'
@@ -13,8 +13,12 @@ export default function App() {
   useLang() // re-render everything when the interface language changes
   const [authed, setAuthed] = useState(!!getToken())
   const [setupNeeded, setSetupNeeded] = useState(null) // true on the very first start (no account yet)
+  const [allowSignup, setAllowSignup] = useState(false)
   useEffect(() => {
-    fetch('/api/config').then((r) => r.json()).then((c) => setSetupNeeded(!!c.setup_needed)).catch(() => setSetupNeeded(false))
+    fetch('/api/config').then((r) => r.json()).then((c) => {
+      setSetupNeeded(!!c.setup_needed)
+      setAllowSignup(!!c.allow_signup)
+    }).catch(() => setSetupNeeded(false))
   }, [])
   useEffect(() => {
     const off = () => setAuthed(false)
@@ -27,7 +31,7 @@ export default function App() {
   }, [])
   if (setupNeeded === null) return null
   if (setupNeeded && !authed) return <Setup onDone={() => { setSetupNeeded(false); setAuthed(true) }} />
-  return authed ? <Shell /> : <Login onDone={() => setAuthed(true)} />
+  return authed ? <Shell /> : <Login onDone={() => setAuthed(true)} allowSignup={allowSignup} />
 }
 
 function ThemeToggle() {
@@ -69,7 +73,8 @@ function AuthFrame({ busy, title, sub, children }) {
   )
 }
 
-function Login({ onDone }) {
+function Login({ onDone, allowSignup }) {
+  const [signup, setSignup] = useState(false)
   const [form, setForm] = useState({ username: '', password: '' })
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
@@ -80,6 +85,7 @@ function Login({ onDone }) {
     try { await login(form.username, form.password); onDone() } catch (x) { setErr(x.status === 401 ? t('wrongLogin') : t('loginFailed')) }
     setBusy(false)
   }
+  if (signup) return <AccountForm mode="signup" onDone={onDone} onSwitch={() => setSignup(false)} />
   return (
     <AuthFrame busy={busy} title={t('loginNeeded')}>
       <form onSubmit={submit} className="login-form stack">
@@ -90,11 +96,15 @@ function Login({ onDone }) {
         <button className="btn primary" disabled={!form.username || !form.password || busy}>{t('signIn')}</button>
       </form>
       <p className="login-err" role="alert">{err}</p>
+      {allowSignup && <button className="auth-switch" onClick={() => setSignup(true)}>{t('signupLink')}</button>}
     </AuthFrame>
   )
 }
 
-function Setup({ onDone }) {
+const Setup = ({ onDone }) => <AccountForm mode="setup" onDone={onDone} />
+
+/** First administrator (mode "setup") or a new user signing up on the login page (mode "signup"). */
+function AccountForm({ mode, onDone, onSwitch }) {
   const [form, setForm] = useState({ display_name: '', username: '', password: '', again: '' })
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
@@ -104,13 +114,19 @@ function Setup({ onDone }) {
     if (form.password !== form.again) return setErr(t('pwMismatch'))
     setBusy(true)
     setErr('')
-    try { await setupAdmin(form.username, form.password, form.display_name); onDone() } catch (x) {
-      setErr(x.status === 409 ? t('alreadySetUp') : t('userRules'))
+    try {
+      if (mode === 'signup') await signUp(form.username, form.password, form.display_name)
+      else await setupAdmin(form.username, form.password, form.display_name)
+      onDone()
+    } catch (x) {
+      setErr(x.status === 409 ? (mode === 'signup' ? t('userTaken') : t('alreadySetUp'))
+        : x.status === 403 ? t('signupOff') : t('userRules'))
     }
     setBusy(false)
   }
   return (
-    <AuthFrame busy={busy} title={t('setupFirst')} sub={t('setupSub')}>
+    <AuthFrame busy={busy} title={mode === 'signup' ? t('signupTitle') : t('setupFirst')}
+               sub={mode === 'signup' ? t('signupSub') : t('setupSub')}>
       <form onSubmit={submit} className="login-form stack">
         <input placeholder={t('displayName')} value={form.display_name} onChange={set('display_name')} autoFocus aria-label={t('displayName')} />
         <input placeholder={t('username')} value={form.username} onChange={set('username')} autoCapitalize="none" autoComplete="username" aria-label={t('username')} />
@@ -119,6 +135,7 @@ function Setup({ onDone }) {
         <button className="btn primary" disabled={!form.username || !form.password || busy}>{t('createAccount')}</button>
       </form>
       <p className="login-err" role="alert">{err}</p>
+      {onSwitch && <button className="auth-switch" onClick={onSwitch}>{t('haveAccount')}</button>}
     </AuthFrame>
   )
 }
@@ -270,7 +287,7 @@ function Shell() {
             ))}
           </div>
           {view === 'core' && (
-            <ChatView convId={convId} setConvId={setConvId} onChanged={refreshAll} orb={orb} setOrb={setOrb} onNew={() => open(null)} voices={voices} />
+            <ChatView convId={convId} setConvId={setConvId} onChanged={refreshAll} orb={orb} setOrb={setOrb} onNew={() => open(null)} voices={voices} me={me} />
           )}
           {view === 'memory' && <MemoryPanel onBack={back} onChanged={refreshDeck} />}
           {view === 'activity' && <ActivityPanel onBack={back} />}
@@ -322,7 +339,7 @@ function greeting() {
 const timeOf = (m) => new Date(m.created_at || m.at || Date.now()).toLocaleTimeString(locale(), { hour: '2-digit', minute: '2-digit' })
 const toolLabel = (name) => (t(`t_${name}`) === `t_${name}` ? name : t(`t_${name}`))
 
-function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew, voices }) {
+function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew, voices, me }) {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
@@ -520,7 +537,7 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew, voices }) 
             </div>
             {empty ? (
               <>
-                <h1 className="welcome-title">{greeting()}. <span>{t('online2')}</span></h1>
+                <h1 className="welcome-title">{greeting()}{me?.display_name ? `, ${me.display_name}` : ''}. <span>{t('online2')}</span></h1>
                 <p className="welcome-sub">{t('welcomeSub', { hint })}</p>
               </>
             ) : voiceMode ? (

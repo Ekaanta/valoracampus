@@ -66,7 +66,22 @@ class PasswordIn(BaseModel):
 @app.get("/api/config")
 def public_config():
     """Tells the web app what to show first: the setup page (no account yet) or the login page."""
-    return {"require_login": True, "setup_needed": not users_exist()}
+    return {"require_login": True, "setup_needed": not users_exist(),
+            "allow_signup": bool(store.get_settings()["allow_signup"])}
+
+
+@app.post("/api/auth/signup")
+def signup(body: SetupIn):
+    """Self sign-up from the login page: a normal user account (if the administrator allows it)."""
+    if not users_exist():
+        raise HTTPException(409, "Please set up the administrator first")
+    if not store.get_settings()["allow_signup"]:
+        raise HTTPException(403, "Sign-up is switched off. Please ask the administrator for an account.")
+    user = create_user(body.username, body.password, body.display_name, role="user")
+    with SessionLocal() as s:
+        s.get(User, user.id).last_login_at = utcnow()
+        s.commit()
+    return {"token": issue_token(user), "user": public(user)}
 
 
 @app.post("/api/auth/setup")

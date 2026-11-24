@@ -450,6 +450,11 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); }
 .login-form input { flex: 1; height: 44px; font-size: 16px; }
 .login-err { min-height: 22px; margin-top: 10px; color: var(--bad); font-size: 14px; }
 .login-form.stack { flex-direction: column; }
+.auth-switch { margin-top: 4px; font-size: 14px; color: var(--hud-text); text-decoration: underline; text-underline-offset: 3px; }
+.auth-switch:hover { color: var(--ink); }
+.check { display: flex; align-items: center; gap: 10px; font-size: 14px; color: var(--ink); cursor: pointer; }
+.check input { width: 18px; height: 18px; accent-color: var(--accent); }
+.check.wide { grid-column: 1 / -1; }
 .login-form.stack .btn { height: 44px; }
 .login-sub { color: var(--ink-2); font-size: 14px; margin-top: 8px; max-width: 34ch; }
 .user-btn { display: inline-flex; align-items: center; gap: 8px; padding: 3px 10px 3px 3px; border: 1px solid var(--line-2); border-radius: 99px; flex: none; }

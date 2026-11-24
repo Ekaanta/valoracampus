@@ -23,6 +23,7 @@ def defaults() -> dict:
         "voice_de": "jens",  # default voices (each device can still choose its own)
         "voice_en": "jarvis",
         "speed": 0.9,
+        "allow_signup": True,  # people can create their own account on the login page
     }
 
 
@@ -58,6 +59,10 @@ def _clean(key: str, value):
         lang = key[-2:]
         if value not in {v["key"] for v in VOICES[lang]}:
             raise ValueError(f"unknown voice: {value}")
+        return value
+    if key == "allow_signup":
+        if not isinstance(value, bool):
+            raise ValueError("allow_signup must be true or false")
         return value
     if key == "speed":
         value = float(value)

@@ -319,6 +319,10 @@ export function AdminPanel({ me, onBack, onSettingsChanged }) {
               <select value={cfg.speed} onChange={(e) => setCfg({ ...cfg, speed: Number(e.target.value) })}>
                 {voices.speeds.map((s) => <option key={s} value={s}>{t(SPEED_KEYS[s] || 'speedNormal')}</option>)}
               </select></label>
+            <label className="check wide">
+              <input type="checkbox" checked={!!cfg.allow_signup} onChange={(e) => setCfg({ ...cfg, allow_signup: e.target.checked })} />
+              <span>{t('f_signup')}</span>
+            </label>
             <label className="field wide"><span>{t('f_persona')}</span>
               <textarea rows={5} {...field('persona')} placeholder={t('personaHint')} /></label>
             <div className="form-actions">

@@ -50,6 +50,8 @@ async function signIn(path, payload) {
 export const login = (username, password) => signIn('/api/auth/login', { username, password })
 /** First start: creates the administrator account (only while no account exists). */
 export const setupAdmin = (username, password, display_name) => signIn('/api/auth/setup', { username, password, display_name })
+/** Sign-up from the login page: a normal user account (when the administrator allows it). */
+export const signUp = (username, password, display_name) => signIn('/api/auth/signup', { username, password, display_name })
 
 /** POST /api/chat and call onEvent for every server-sent event. */
 export async function streamChat(body, onEvent, signal) {
