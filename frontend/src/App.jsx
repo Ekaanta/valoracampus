@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, getToken, login, setToken, streamChat } from './api.js'
-import { createSpeaker, listen, speak, stopSpeaking, unlockAudio } from './voice.js'
+import { createSpeaker, listen, setVoicePrefs, speak, stopSpeaking, unlockAudio, voicePrefs } from './voice.js'
 import { ActivityPanel, HistoryPanel, MemoryPanel, SystemsPanel } from './panels.jsx'
 import { Brain, Feed, Panel, ProviderList, Sessions, Telemetry } from './hud.jsx'
 import { currentLang, locale, plural, speechLang, t, useLang } from './i18n.js'
@@ -118,6 +118,7 @@ function Shell({ canLogout }) {
   const [providers, setProviders] = useState([])
   const [memories, setMemories] = useState([])
   const [activity, setActivity] = useState([])
+  const [voices, setVoices] = useState(null) // voice picker choices from the server
   const [orb, setOrb] = useState('idle') // shared with the telemetry panel
   const seen = useRef(new Set())
 
@@ -132,6 +133,7 @@ function Shell({ canLogout }) {
 
   useEffect(() => {
     refreshAll()
+    api('/voices').then(setVoices).catch(() => {})
     fetch('/api/health').then((r) => r.json()).then((h) => setSetup(h.problems || [])).catch(() => {})
     const timer = setInterval(() => { if (!document.hidden) refreshDeck() }, 15000)
     return () => clearInterval(timer)
@@ -217,7 +219,7 @@ function Shell({ canLogout }) {
             ))}
           </div>
           {view === 'core' && (
-            <ChatView convId={convId} setConvId={setConvId} onChanged={refreshAll} orb={orb} setOrb={setOrb} onNew={() => open(null)} />
+            <ChatView convId={convId} setConvId={setConvId} onChanged={refreshAll} orb={orb} setOrb={setOrb} onNew={() => open(null)} voices={voices} />
           )}
           {view === 'memory' && <MemoryPanel onBack={back} onChanged={refreshDeck} />}
           {view === 'activity' && <ActivityPanel onBack={back} />}
@@ -265,7 +267,7 @@ function greeting() {
 const timeOf = (m) => new Date(m.created_at || m.at || Date.now()).toLocaleTimeString(locale(), { hour: '2-digit', minute: '2-digit' })
 const toolLabel = (name) => (t(`t_${name}`) === `t_${name}` ? name : t(`t_${name}`))
 
-function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew }) {
+function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew, voices }) {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
@@ -545,10 +547,34 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew }) {
             <span className="track"><span className="thumb" /></span>
             {t('handsFree')}
           </label>
+          <VoicePicker voices={voices} onPreview={() => speakAgain(t('voiceSample'))} />
           <span className="hint">{t('enterHint')}</span>
         </div>
       </form>
     </div>
+  )
+}
+
+/** Voice and speaking speed for the current language; a short sample plays after every change. */
+function VoicePicker({ voices, onPreview }) {
+  const [lang] = useLang()
+  const [prefs, setPrefs] = useState(voicePrefs)
+  const list = voices?.[lang] || []
+  if (!list.length) return null
+  const voice = list.some((v) => v.key === prefs[lang]) ? prefs[lang] : list[0].key
+  const speed = voices.speeds.includes(prefs.speed) ? prefs.speed : voices.default_speed
+  const change = (patch) => { setPrefs(setVoicePrefs(patch)); onPreview() }
+  const speedNames = [t('speedCalm'), t('speedNormal'), t('speedBrisk')]
+  return (
+    <span className="voice-picker">
+      <Icon name="speaker" size={14} />
+      <select value={voice} onChange={(e) => change({ [lang]: e.target.value })} aria-label={t('voiceLabel')} title={t('voiceLabel')}>
+        {list.map((v) => <option key={v.key} value={v.key}>{v.fish ? v.name : `${v.name} · ${t('standardVoice')}`}</option>)}
+      </select>
+      <select value={speed} onChange={(e) => change({ speed: Number(e.target.value) })} aria-label={t('speedLabel')} title={t('speedLabel')}>
+        {voices.speeds.map((s, i) => <option key={s} value={s}>{speedNames[i] || s}</option>)}
+      </select>
+    </span>
   )
 }
 

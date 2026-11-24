@@ -328,8 +328,15 @@ def reminder_done(rem_id: int):
 # ------------------------------------------------------------------ voice
 class TTSIn(BaseModel):
     text: str
-    voice: str | None = None
+    voice: str | None = None  # an edge-tts voice name (overrides everything)
     lang: str | None = None  # picks a native voice: German text needs a German voice (no English accent)
+    voice_key: str | None = None  # the voice chosen in the app, e.g. "jens" or "standard"
+    speed: float | None = None  # 0.82 calm, 0.9 normal, 1.0 brisk
+
+
+@app.get("/api/voices", dependencies=[Depends(auth)])
+def voices():
+    return fish.catalogue()
 
 
 @app.post("/api/tts", dependencies=[Depends(auth)])
@@ -338,8 +345,10 @@ async def tts(body: TTSIn):
     Whenever Fish is not usable: the standard voice (edge-tts) as one MP3."""
     lang = settings.lang(body.lang)
     text = body.text[:4000]
-    if not body.voice and fish.fish_enabled(lang):
-        opened = await fish.fish_stream(text, lang)
+    choice = fish.pick(lang, body.voice_key)
+    speed = fish.speed_of(body.speed)
+    if not body.voice and choice["fish"] and fish.fish_enabled(lang):
+        opened = await fish.fish_stream(text, lang, choice["fish"], speed)
         if opened:
             client, resp = opened
 
@@ -354,7 +363,8 @@ async def tts(body: TTSIn):
             return StreamingResponse(pcm(), media_type="audio/pcm", headers={
                 "X-Sample-Rate": str(fish.SAMPLE_RATE), "X-TTS-Engine": "fish", "Cache-Control": "no-store"})
     audio = bytearray()
-    async for chunk in edge_tts.Communicate(text, body.voice or settings.voice_for(lang)).stream():
+    rate = f"{round((speed - 1) * 100):+d}%"  # the same pace for the standard voice
+    async for chunk in edge_tts.Communicate(text, body.voice or settings.voice_for(lang), rate=rate).stream():
         if chunk["type"] == "audio":
             audio.extend(chunk["data"])
     return Response(bytes(audio), media_type="audio/mpeg", headers={"X-TTS-Engine": "edge"})

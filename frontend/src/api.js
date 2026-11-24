@@ -61,8 +61,9 @@ export async function streamChat(body, onEvent, signal) {
 }
 
 /** Simon's voice for one piece of text: MP3 (standard voice) or streamed raw PCM (Fish Audio). */
-export async function ttsFetch(text, lang) {
-  return check(await fetch('/api/tts', { method: 'POST', headers: headers(), body: JSON.stringify({ text, lang }) }))
+export async function ttsFetch(text, lang, voiceKey, speed) {
+  const body = JSON.stringify({ text, lang, voice_key: voiceKey, speed })
+  return check(await fetch('/api/tts', { method: 'POST', headers: headers(), body }))
 }
 
 export async function transcribe(blob, lang) {

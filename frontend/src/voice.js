@@ -64,6 +64,17 @@ let levels = null
 let browserVoice = false // true while the browser's own voice speaks (no analyser available)
 let active = null // the speaker that is talking right now
 
+/* The chosen voice per language and the speaking speed, saved on this device: { de: 'jens', en: 'jarvis', speed: 0.9 } */
+const PREFS = 'simon_voice'
+export function voicePrefs() {
+  try { return JSON.parse(localStorage.getItem(PREFS)) || {} } catch { return {} }
+}
+export function setVoicePrefs(patch) {
+  const next = { ...voicePrefs(), ...patch }
+  try { localStorage.setItem(PREFS, JSON.stringify(next)) } catch { /* private mode */ }
+  return next
+}
+
 /**
  * Loudness of Simon's voice right now, as the sphere expects it ("target", 0 to 0.7; 0 between words
  * and sentences), or null while the browser's own voice is used. Formula from the client's sphere spec.
@@ -313,7 +324,9 @@ export function createSpeaker(lang, { onStart, onSentence } = {}) {
       ? slot().then((release) => {
         item.release = release
         if (speaker.stopped) { release(); return null }
-        return ttsFetch(clean, lang?.slice(0, 2)).then(async (res) => {
+        const short = (lang || 'de').slice(0, 2)
+        const prefs = voicePrefs()
+        return ttsFetch(clean, short, prefs[short], prefs.speed).then(async (res) => {
           if ((res.headers.get('Content-Type') || '').includes('audio/pcm')) {
             return { pcm: res, rate: Number(res.headers.get('X-Sample-Rate')) || 24000 } // Fish Audio, streamed
           }
