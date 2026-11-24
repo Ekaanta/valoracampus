@@ -14,7 +14,9 @@ export default function App() {
   const [authed, setAuthed] = useState(!!getToken())
   const [needLogin, setNeedLogin] = useState(null) // asked from the server: login page on or off
   useEffect(() => {
-    fetch('/api/config').then((r) => r.json()).then((c) => setNeedLogin(!!c.require_login)).catch(() => setNeedLogin(true))
+    // Login only when the server says so. If the check fails (cold start, network), open the app:
+    // the server still refuses requests when login is required, so nothing is exposed.
+    fetch('/api/config').then((r) => r.json()).then((c) => setNeedLogin(!!c.require_login)).catch(() => setNeedLogin(false))
   }, [])
   useEffect(() => {
     const off = () => setAuthed(false)

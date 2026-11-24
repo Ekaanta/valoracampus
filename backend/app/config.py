@@ -49,6 +49,9 @@ class Settings(BaseSettings):
     default_city: str = "Berlin"
     tts_voice_de: str = "de-DE-ConradNeural"  # native German voice (edge-tts)
     tts_voice_en: str = "en-GB-RyanNeural"
+    # German voice through Fish Audio (free model s2.1-pro-free only); empty key = standard voice above
+    fish_audio_key: str = ""
+    fish_voice_id: str = "52c4b7e78af343d7aed558478a19e6cb"  # "Jens Deutsche Stimme": licensed, deep, calm narrator
 
     def voice_for(self, lang: str | None) -> str:
         return self.tts_voice_en if lang == "en" else self.tts_voice_de

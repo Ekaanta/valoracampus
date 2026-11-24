@@ -1,4 +1,4 @@
-import { transcribe, ttsAudio } from './api.js'
+import { transcribe, ttsFetch } from './api.js'
 
 const Recognition = typeof window !== 'undefined' && (window.SpeechRecognition || window.webkitSpeechRecognition)
 
@@ -118,17 +118,96 @@ function cutAt(text, min) {
   return -1
 }
 
+function ensureAnalyser() {
+  if (analyser) return
+  analyser = ctx.createAnalyser()
+  analyser.fftSize = 1024
+  analyser.smoothingTimeConstant = 0.4
+  levels = new Uint8Array(analyser.frequencyBinCount)
+  analyser.connect(ctx.destination)
+}
+
+// At most two voice requests at a time (Fish Audio's free tier allows five in parallel).
+let busySlots = 0
+const waitingSlots = []
+function slot() {
+  return new Promise((resolve) => {
+    const give = () => {
+      busySlots++
+      let freed = false
+      resolve(() => { if (freed) return; freed = true; busySlots--; waitingSlots.shift()?.() })
+    }
+    if (busySlots < 2) give()
+    else waitingSlots.push(give)
+  })
+}
+
+/** Plays raw 16-bit mono PCM while it is still arriving (Fish Audio), in pieces of ~120 ms. */
+async function playPcm(res, rate, setStop) {
+  ensureAnalyser()
+  const reader = res.body.getReader()
+  const nodes = new Set()
+  let stopped = false
+  let at = ctx.currentTime + 0.12 // a small head start against network jitter
+  let carry = -1 // a byte left over when a network chunk ends in the middle of a sample
+  let batch = []
+  let batchLen = 0
+  const minLen = Math.round(rate * 0.12)
+  setStop(() => {
+    stopped = true
+    reader.cancel().catch(() => {})
+    nodes.forEach((n) => { try { n.stop() } catch { /* not started */ } })
+  })
+  const flush = () => {
+    if (!batchLen || stopped) return
+    const samples = new Float32Array(batchLen)
+    let o = 0
+    for (const b of batch) { samples.set(b, o); o += b.length }
+    batch = []
+    batchLen = 0
+    const buf = ctx.createBuffer(1, samples.length, rate)
+    buf.copyToChannel(samples, 0)
+    const node = ctx.createBufferSource()
+    node.buffer = buf
+    node.connect(analyser) // the sphere reads the voice level from here
+    if (at < ctx.currentTime + 0.02) at = ctx.currentTime + 0.02
+    node.start(at)
+    at += buf.duration
+    nodes.add(node)
+    node.onended = () => nodes.delete(node)
+    source = node
+  }
+  for (;;) {
+    let r
+    try { r = await reader.read() } catch { break }
+    if (r.done || stopped) break
+    let bytes = r.value
+    if (carry >= 0) {
+      const joined = new Uint8Array(bytes.length + 1)
+      joined[0] = carry
+      joined.set(bytes, 1)
+      bytes = joined
+      carry = -1
+    }
+    if (bytes.length % 2) { carry = bytes[bytes.length - 1]; bytes = bytes.subarray(0, bytes.length - 1) }
+    const n = bytes.length / 2
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.length)
+    const f = new Float32Array(n)
+    for (let i = 0; i < n; i++) f[i] = view.getInt16(i * 2, true) / 32768
+    batch.push(f)
+    batchLen += n
+    if (batchLen >= minLen) flush()
+  }
+  flush()
+  while (!stopped && ctx.currentTime < at - 0.01) await new Promise((r) => setTimeout(r, 40))
+  source = null
+}
+
 function playBuffer(buffer, setStop) {
   return new Promise((resolve) => {
     const src = ctx.createBufferSource()
     src.buffer = buffer
-    if (!analyser) {
-      analyser = ctx.createAnalyser()
-      analyser.fftSize = 1024
-      analyser.smoothingTimeConstant = 0.4
-      levels = new Uint8Array(analyser.frequencyBinCount)
-      analyser.connect(ctx.destination)
-    }
+    ensureAnalyser()
     src.connect(analyser) // the sphere reads the voice level from here
     source = src
     src.onended = () => { if (source === src) source = null; resolve() }
@@ -188,6 +267,10 @@ export function createSpeaker(lang, { onStart, onSentence } = {}) {
     stop() {
       if (speaker.stopped) return
       speaker.stopped = true
+      for (const item of queue) { // free waiting requests and close their audio streams
+        item.release?.()
+        item.audio.then((a) => a?.pcm?.body?.cancel().catch(() => {}))
+      }
       queue.length = 0
       pending = ''
       stopCurrent?.()
@@ -198,11 +281,21 @@ export function createSpeaker(lang, { onStart, onSentence } = {}) {
   function enqueue(text) {
     const clean = plain(text)
     if (!clean) return
-    // the audio is fetched right away, so the next sentence is ready when the current one ends
-    const audio = ctx
-      ? ttsAudio(clean, lang?.slice(0, 2)).then((blob) => blob.arrayBuffer()).then((data) => ctx.decodeAudioData(data)).catch(() => null)
+    // the audio is requested right away, so the next sentence is ready when the current one ends
+    const item = { text: clean, release: null }
+    item.audio = ctx
+      ? slot().then((release) => {
+        item.release = release
+        if (speaker.stopped) { release(); return null }
+        return ttsFetch(clean, lang?.slice(0, 2)).then(async (res) => {
+          if ((res.headers.get('Content-Type') || '').includes('audio/pcm')) {
+            return { pcm: res, rate: Number(res.headers.get('X-Sample-Rate')) || 24000 } // Fish Audio, streamed
+          }
+          return { buffer: await ctx.decodeAudioData(await res.arrayBuffer()) } // standard voice, one MP3
+        })
+      }).catch(() => null)
       : Promise.resolve(null)
-    queue.push({ text: clean, audio })
+    queue.push(item)
   }
 
   async function run() {
@@ -210,12 +303,16 @@ export function createSpeaker(lang, { onStart, onSentence } = {}) {
     running = true
     while (!speaker.stopped && queue.length) {
       const item = queue.shift()
-      const buffer = await item.audio
-      if (speaker.stopped) break
-      if (!started) { started = true; onStart?.() }
-      onSentence?.(item.text)
-      if (buffer) await playBuffer(buffer, (fn) => { stopCurrent = fn })
-      else await browserSay(item.text, lang, (fn) => { stopCurrent = fn })
+      const audio = await item.audio
+      if (!speaker.stopped) {
+        if (!started) { started = true; onStart?.() }
+        onSentence?.(item.text)
+        const setStop = (fn) => { stopCurrent = fn }
+        if (audio?.pcm) await playPcm(audio.pcm, audio.rate, setStop)
+        else if (audio?.buffer) await playBuffer(audio.buffer, setStop)
+        else await browserSay(item.text, lang, setStop)
+      } else audio?.pcm?.body?.cancel().catch(() => {}) // stopped before it played
+      item.release?.()
     }
     running = false
     if (speaker.stopped || (ended && !queue.length)) finish()

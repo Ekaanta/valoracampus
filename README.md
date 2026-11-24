@@ -86,6 +86,7 @@ calls the free tiers of Groq / Gemini / OpenRouter directly; everything else wor
    | `GROQ_API_KEY` | from console.groq.com (free) |
    | `GEMINI_API_KEY` | from aistudio.google.com (free) – optional second provider |
    | `TIMEZONE`, `DEFAULT_CITY`, `LANGUAGE`, `TTS_VOICE_DE`, `TTS_VOICE_EN` | optional |
+   | `FISH_AUDIO_KEY` | optional: German voice from Fish Audio (free model only), from fish.audio → API keys |
 
 4. **Deployments → Redeploy**. Open `https://<project>.vercel.app/api/health` – it should show
    `"database": "ok"` and the configured AI providers. Then open the main URL and log in.
@@ -126,7 +127,7 @@ Add `sensitive=True, summarize=lambda a: "..."` if it spends money, publishes or
 **Add an AI provider** – add its key in the FreeLLMAPI dashboard (no code change). For a provider FreeLLMAPI
 does not support, add a `Provider(...)` entry in `LLMRouter.__init__` in `backend/app/llm.py`.
 
-**Change voice / language** – German is the default; every device can switch DE/EN in the top bar. Voices: `TTS_VOICE_DE` (default `de-DE-ConradNeural`, female: `de-DE-KatjaNeural`) and `TTS_VOICE_EN` in `.env`.
+**Change voice / language** – German is the default; every device can switch DE/EN in the top bar. Voices: `TTS_VOICE_DE` (default `de-DE-ConradNeural`, female: `de-DE-KatjaNeural`) and `TTS_VOICE_EN` in `.env`. With `FISH_AUDIO_KEY` set, German is spoken by the Fish Audio narrator voice `FISH_VOICE_ID` (default "Jens Deutsche Stimme", a licensed voice) through the free model `s2.1-pro-free` only, streamed so it starts within about a second; any Fish error falls back to the standard voice.
 
 ## AI providers
 

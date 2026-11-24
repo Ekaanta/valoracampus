@@ -20,6 +20,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.exc import OperationalError
 
 from . import tools
+from . import voice as fish
 from .agent import ensure_conversation, run_turn, save_message
 from .config import settings
 from .db import (ActivityLog, Conversation, Memory, Message, PendingAction, Reminder, SessionLocal,
@@ -332,11 +333,30 @@ class TTSIn(BaseModel):
 
 @app.post("/api/tts", dependencies=[Depends(auth)])
 async def tts(body: TTSIn):
+    """German: Fish Audio (free model), streamed as raw PCM so playback starts at once.
+    Otherwise, or whenever Fish is not usable: the standard voice (edge-tts) as one MP3."""
+    lang = settings.lang(body.lang)
+    text = body.text[:4000]
+    if not body.voice and fish.fish_enabled(lang):
+        opened = await fish.fish_stream(text)
+        if opened:
+            client, resp = opened
+
+            async def pcm():
+                try:
+                    async for chunk in resp.aiter_bytes():
+                        yield chunk
+                finally:
+                    await resp.aclose()
+                    await client.aclose()
+
+            return StreamingResponse(pcm(), media_type="audio/pcm", headers={
+                "X-Sample-Rate": str(fish.SAMPLE_RATE), "X-TTS-Engine": "fish", "Cache-Control": "no-store"})
     audio = bytearray()
-    async for chunk in edge_tts.Communicate(body.text[:4000], body.voice or settings.voice_for(settings.lang(body.lang))).stream():
+    async for chunk in edge_tts.Communicate(text, body.voice or settings.voice_for(lang)).stream():
         if chunk["type"] == "audio":
             audio.extend(chunk["data"])
-    return Response(bytes(audio), media_type="audio/mpeg")
+    return Response(bytes(audio), media_type="audio/mpeg", headers={"X-TTS-Engine": "edge"})
 
 
 @app.post("/api/stt", dependencies=[Depends(auth)])
