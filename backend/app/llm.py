@@ -34,6 +34,10 @@ class Provider:
     timeout: float = 90  # seconds to wait for the first byte before failing over
     keyless: bool = False  # the provider rejects any Authorization header (OVH anonymous tier)
     light: bool = False  # a small model: used first for background work such as memory extraction
+    key: str = ""  # stable id: the name for built-in providers, "c:<id>" for models the administrator added
+    custom: bool = False
+    first: bool = False  # an added model the administrator wants tried before the built-in ones
+    sig: tuple = ()
     ok_count: int = 0
     fail_count: int = 0
     last_error: str = ""
@@ -54,6 +58,7 @@ class Provider:
     def status(self) -> dict:
         now = time.time()
         return {
+            "key": self.key or self.name, "custom": self.custom,
             "name": self.name, "model": self.model, "paid": self.paid, "base_url": self.base_url,
             "ok_count": self.ok_count, "fail_count": self.fail_count, "last_error": self.last_error,
             "last_ok_at": self.last_ok_at or None,
@@ -101,11 +106,15 @@ def _short(err: Exception) -> str:
 
 class LLMRouter:
     def __init__(self) -> None:
-        self.free: list[Provider] = []
+        self._custom: dict[str, Provider] = {}  # models the administrator added in the app
+        self._order: list[str] = []
+        self._off: set[str] = set()  # switched off by the administrator
+        self._synced = 0.0
+        self.builtin: list[Provider] = []  # providers from the server configuration (.env / Vercel)
         if settings.freellmapi_key:
             # FreeLLMAPI does its own failover across free providers within ~45 s;
             # if it still has nothing by then, SIMON moves on to the local model.
-            self.free.append(Provider("FreeLLMAPI", settings.freellmapi_url,
+            self.builtin.append(Provider("FreeLLMAPI", settings.freellmapi_url,
                                       settings.freellmapi_key, settings.freellmapi_model, timeout=50))
         cf_url = f"https://api.cloudflare.com/client/v4/accounts/{settings.cloudflare_account_id}/ai/v1"
         direct = [  # genuinely free tiers only (see docs/AI_PROVIDERS.md)
@@ -121,19 +130,78 @@ class LLMRouter:
         ]
         for name, url, key, model in direct:
             if key and model:
-                self.free.append(Provider(name, url, key, model, timeout=45, light=name == "Groq backup"))
+                self.builtin.append(Provider(name, url, key, model, timeout=45, light=name == "Groq backup"))
         ovh_models = [m.strip() for m in settings.ovh_model.split(",") if m.strip()] if settings.ovh_url else []
         for i, model in enumerate(ovh_models):  # keyless: works without any account
-            self.free.append(Provider("OVHcloud (EU)" + (f" {i + 1}" if i else ""), settings.ovh_url, "", model,
+            self.builtin.append(Provider("OVHcloud (EU)" + (f" {i + 1}" if i else ""), settings.ovh_url, "", model,
                                       timeout=45, keyless=True, light=model.endswith("-20b")))
         if settings.ollama_model:
-            self.free.append(Provider("Ollama (local)", settings.ollama_url, "ollama", settings.ollama_model,
+            self.builtin.append(Provider("Ollama (local)", settings.ollama_url, "ollama", settings.ollama_model,
                                       timeout=240))
-        self.paid: Provider | None = None
+        self.builtin_paid: Provider | None = None
         if settings.paid_url and settings.paid_key and settings.paid_model:
-            self.paid = Provider(settings.paid_name or "Paid provider", settings.paid_url,
-                                 settings.paid_key, settings.paid_model, paid=True,
-                                 cost_note=settings.paid_cost_note)
+            self.builtin_paid = Provider(settings.paid_name or "Paid provider", settings.paid_url,
+                                         settings.paid_key, settings.paid_model, paid=True,
+                                         cost_note=settings.paid_cost_note)
+        for p in self.builtin + ([self.builtin_paid] if self.builtin_paid else []):
+            p.key = p.name
+
+    # -- the administrator's models (stored in the database, read at most every 15 s) ---------------
+    def refresh(self, force: bool = False) -> None:
+        now = time.time()
+        if not force and now - self._synced < 15:
+            return
+        self._synced = now
+        try:
+            from . import store
+            cfg = store.get_models()
+        except Exception:  # database not reachable: keep the last known list
+            return
+        fresh: dict[str, Provider] = {}
+        for c in cfg["custom"]:
+            sig = (c["name"], c["base_url"], c.get("api_key", ""), c["model"], bool(c.get("paid")), c.get("cost_note", ""))
+            p = self._custom.get(c["id"])
+            if p is None or p.sig != sig:  # new or changed: a fresh client (statistics start again)
+                p = Provider(c["name"], c["base_url"], c.get("api_key", ""), c["model"], paid=bool(c.get("paid")),
+                             cost_note=c.get("cost_note", ""), timeout=60, key="c:" + c["id"], custom=True, sig=sig)
+            p.first = bool(c.get("first"))
+            fresh[c["id"]] = p
+        self._custom = fresh
+        self._order = [c["id"] for c in cfg["custom"]]
+        self._off = set(cfg["off"])
+
+    def _added(self) -> list[Provider]:
+        return [self._custom[i] for i in self._order if i in self._custom]
+
+    @property
+    def free(self) -> list[Provider]:
+        """Free providers in the order they are tried (without the ones the administrator switched off)."""
+        self.refresh()
+        added = [p for p in self._added() if not p.paid]
+        order = [p for p in added if p.first] + self.builtin + [p for p in added if not p.first]
+        return [p for p in order if p.key not in self._off]
+
+    @property
+    def paid_list(self) -> list[Provider]:
+        """Paid providers: only ever used after the user approved it in the app."""
+        self.refresh()
+        order = ([self.builtin_paid] if self.builtin_paid else []) + [p for p in self._added() if p.paid]
+        return [p for p in order if p.key not in self._off]
+
+    @property
+    def paid(self) -> Provider | None:
+        paid = self.paid_list
+        return paid[0] if paid else None
+
+    def everything(self) -> list[Provider]:
+        """All providers, also the switched-off ones (for the administration)."""
+        self.refresh()
+        added = self._added()
+        return ([p for p in added if p.first and not p.paid] + self.builtin + [p for p in added if not p.first and not p.paid]
+                + ([self.builtin_paid] if self.builtin_paid else []) + [p for p in added if p.paid])
+
+    def is_on(self, p: Provider) -> bool:
+        return p.key not in self._off
 
     # -- helpers -------------------------------------------------------------
     def _candidates(self, allow_paid: bool, light: bool = False) -> list[Provider]:
@@ -142,8 +210,8 @@ class LLMRouter:
         ready = [p for p in free if p.cooldown_until <= now]
         cooling = [p for p in free if p.cooldown_until > now]
         order = ready + cooling  # cooling providers are still tried as a last free resort
-        if allow_paid and self.paid:
-            order.append(self.paid)
+        if allow_paid:
+            order += self.paid_list
         return order
 
     def _ok(self, p: Provider) -> None:
@@ -159,8 +227,9 @@ class LLMRouter:
         log_activity("llm_failover", f"{p.name} failed, switching provider", {"error": p.last_error})
 
     def _exhausted(self, errors: list[str], allow_paid: bool, limited: list | None = None):
-        if self.paid and not allow_paid:
-            raise PaidApprovalRequired(self.paid, "All free AI providers are unavailable right now: "
+        paid = self.paid
+        if paid and not allow_paid:
+            raise PaidApprovalRequired(paid, "All free AI providers are unavailable right now: "
                                        + " | ".join(errors))
         only_limits = bool(limited) and len(limited) == len(errors)
         raise AllProvidersFailed(" | ".join(errors) or "No AI provider is configured",
@@ -249,10 +318,20 @@ class LLMRouter:
         return None
 
     def status(self) -> list[dict]:
-        items = [p.status() for p in self.free]
-        if self.paid:
-            items.append(self.paid.status())
-        return items
+        return [p.status() for p in self.free + self.paid_list]
+
+
+def test_model(base_url: str, api_key: str, model: str, client: OpenAI | None = None) -> dict:
+    """One tiny request, so the administrator sees at once whether a model answers."""
+    started = time.time()
+    try:
+        client = client or OpenAI(base_url=base_url, api_key=api_key or "none", timeout=25, max_retries=0)
+        resp = client.chat.completions.create(model=model, max_tokens=20,
+                                              messages=[{"role": "user", "content": "Reply with the single word: ready"}])
+        text = (resp.choices[0].message.content or "").strip() if resp.choices else ""
+        return {"ok": True, "reply": text[:80], "seconds": round(time.time() - started, 1)}
+    except Exception as err:
+        return {"ok": False, "error": _short(err)}
 
 
 router = LLMRouter()

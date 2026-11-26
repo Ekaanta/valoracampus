@@ -5,6 +5,8 @@ import asyncio
 import hmac
 import json
 import os
+import re
+import secrets
 import time
 from datetime import timedelta
 from pathlib import Path
@@ -26,8 +28,8 @@ from .accounts import (admin_user, check_password, claim_existing_data, create_u
 from .agent import ensure_conversation, run_turn, save_message
 from .config import settings
 from .db import (ActivityLog, Conversation, Memory, Message, PendingAction, Reminder, SessionLocal, User,
-                 init_db, utcnow)
-from .llm import router
+                 init_db, log_activity, utcnow)
+from .llm import router, test_model
 
 app = FastAPI(title="SIMON")
 app.add_middleware(CORSMiddleware, allow_origins=[o.strip() for o in settings.cors_origins.split(",")],
@@ -538,6 +540,196 @@ def admin_save_settings(body: dict, admin: User = Depends(admin_user)):
         return {"settings": store.save_settings(body), "voices": fish.catalogue()}
     except ValueError as err:
         raise HTTPException(400, str(err))
+
+
+# ------------------------------------------------------------------ administration: AI models
+# Ready-made entries for the "add model" form (any OpenAI-compatible service works; the key comes from its website).
+MODEL_PRESETS = [
+    {"id": "nvidia", "name": "NVIDIA Build", "base_url": "https://integrate.api.nvidia.com/v1",
+     "model": "openai/gpt-oss-120b", "key_url": "https://build.nvidia.com", "free": True},
+    {"id": "openrouter", "name": "OpenRouter", "base_url": "https://openrouter.ai/api/v1",
+     "model": "", "key_url": "https://openrouter.ai/keys", "free": True, "hint": "free models end in :free"},
+    {"id": "groq", "name": "Groq", "base_url": "https://api.groq.com/openai/v1",
+     "model": "openai/gpt-oss-120b", "key_url": "https://console.groq.com/keys", "free": True},
+    {"id": "cerebras", "name": "Cerebras", "base_url": "https://api.cerebras.ai/v1",
+     "model": "gpt-oss-120b", "key_url": "https://cloud.cerebras.ai", "free": True},
+    {"id": "gemini", "name": "Google Gemini", "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+     "model": "gemini-flash-latest", "key_url": "https://aistudio.google.com/apikey", "free": True},
+    {"id": "mistral", "name": "Mistral", "base_url": "https://api.mistral.ai/v1",
+     "model": "mistral-small-latest", "key_url": "https://console.mistral.ai/api-keys", "free": True},
+    {"id": "ollama", "name": "Ollama (own server)", "base_url": "http://127.0.0.1:11434/v1",
+     "model": "", "key_url": "", "free": True, "hint": "a model installed with ollama pull"},
+    {"id": "lmstudio", "name": "LM Studio (own server)", "base_url": "http://127.0.0.1:1234/v1",
+     "model": "", "key_url": "", "free": True, "hint": "the model loaded in LM Studio, e.g. Spark-X2.5-4B"},
+    {"id": "custom", "name": "", "base_url": "", "model": "", "key_url": "", "free": True},
+]
+
+
+class ModelIn(BaseModel):
+    name: str = Field(..., min_length=1, max_length=40)
+    base_url: str = Field(..., min_length=8, max_length=300)
+    api_key: str = Field("", max_length=500)
+    model: str = Field(..., min_length=1, max_length=160)
+    paid: bool = False  # paid models are only used after the user approved it in the app
+    first: bool = False  # try before the built-in models
+    cost_note: str = Field("", max_length=120)
+
+
+class ModelPatch(BaseModel):
+    enabled: bool | None = None
+    first: bool | None = None
+
+
+class ModelTest(BaseModel):
+    key: str | None = None  # an existing model ...
+    base_url: str | None = None  # ... or one that is about to be added
+    api_key: str = ""
+    model: str | None = None
+
+
+def _model_rows() -> list[dict]:
+    rows = []
+    for p in router.everything():
+        rows.append({"key": p.key, "name": p.name, "model": p.model, "base_url": p.base_url, "paid": p.paid,
+                     "custom": p.custom, "first": p.first, "enabled": router.is_on(p),
+                     "key_hint": f"…{p.api_key[-4:]}" if p.custom and len(p.api_key) >= 8 else "",
+                     "ok_count": p.ok_count, "fail_count": p.fail_count, "last_error": p.last_error,
+                     "cooling_down": p.cooldown_until > time.time()})
+    return rows
+
+
+def _clean_url(url: str) -> str:
+    url = url.strip().rstrip("/")
+    if not re.match(r"^https?://[^\s/]+", url):
+        raise HTTPException(400, "The address must start with http:// or https://")
+    return url
+
+
+@app.get("/api/admin/models")
+def admin_models(admin: User = Depends(admin_user)):
+    router.refresh(force=True)
+    return {"models": _model_rows(), "presets": MODEL_PRESETS}
+
+
+@app.post("/api/admin/models")
+def admin_add_model(body: ModelIn, admin: User = Depends(admin_user)):
+    router.refresh(force=True)
+    name = body.name.strip()
+    if any(p.name.lower() == name.lower() for p in router.everything()):
+        raise HTTPException(409, "A model with this name exists already")
+    cfg = store.get_models()
+    cfg["custom"].append({"id": secrets.token_hex(4), "name": name, "base_url": _clean_url(body.base_url),
+                          "api_key": body.api_key.strip(), "model": body.model.strip(), "paid": body.paid,
+                          "first": body.first, "cost_note": body.cost_note.strip()})
+    store.save_models(cfg)
+    router.refresh(force=True)
+    log_activity("admin", f"AI model added: {name} ({body.model.strip()})", user_id=admin.id)
+    return {"models": _model_rows()}
+
+
+@app.patch("/api/admin/models/{key}")
+def admin_change_model(key: str, body: ModelPatch, admin: User = Depends(admin_user)):
+    router.refresh(force=True)
+    every = router.everything()
+    if key not in {p.key for p in every}:
+        raise HTTPException(404, "Unknown model")
+    cfg = store.get_models()
+    if body.enabled is not None:
+        off = set(cfg["off"])
+        if body.enabled:
+            off.discard(key)
+        else:
+            off.add(key)
+            if not any(p.key not in off and not p.paid for p in every):
+                raise HTTPException(400, "At least one free model must stay switched on")
+        cfg["off"] = sorted(off)
+    if body.first is not None:
+        for c in cfg["custom"]:
+            if f"c:{c['id']}" == key:
+                c["first"] = body.first
+    store.save_models(cfg)
+    router.refresh(force=True)
+    return {"models": _model_rows()}
+
+
+@app.delete("/api/admin/models/{key}")
+def admin_delete_model(key: str, admin: User = Depends(admin_user)):
+    if not key.startswith("c:"):
+        raise HTTPException(400, "Models from the server configuration can only be switched off")
+    cfg = store.get_models()
+    left = [c for c in cfg["custom"] if f"c:{c['id']}" != key]
+    if len(left) == len(cfg["custom"]):
+        raise HTTPException(404, "Unknown model")
+    gone = next(c for c in cfg["custom"] if f"c:{c['id']}" == key)
+    store.save_models({"custom": left, "off": [k for k in cfg["off"] if k != key]})
+    router.refresh(force=True)
+    log_activity("admin", f"AI model removed: {gone['name']}", user_id=admin.id)
+    return {"models": _model_rows()}
+
+
+@app.post("/api/admin/models/test")
+async def admin_test_model(body: ModelTest, admin: User = Depends(admin_user)):
+    if body.key:
+        p = next((p for p in router.everything() if p.key == body.key), None)
+        if not p:
+            raise HTTPException(404, "Unknown model")
+        return await asyncio.to_thread(test_model, p.base_url, p.api_key, p.model, p.client())
+    if not body.base_url or not body.model:
+        raise HTTPException(400, "Address and model are needed")
+    return await asyncio.to_thread(test_model, _clean_url(body.base_url), body.api_key.strip(), body.model.strip())
+
+
+# ------------------------------------------------------------------ administration: voices
+class VoiceIn(BaseModel):
+    lang: str
+    name: str = Field(..., min_length=1, max_length=30)
+    fish: str = Field(..., min_length=32, max_length=300)  # the Fish Audio voice id, or its page address
+
+
+@app.get("/api/admin/voices")
+def admin_voices(admin: User = Depends(admin_user)):
+    return {"added": store.get_custom_voices()}
+
+
+@app.post("/api/admin/voices")
+async def admin_add_voice(body: VoiceIn, admin: User = Depends(admin_user)):
+    if body.lang not in ("de", "en"):
+        raise HTTPException(400, "Language must be de or en")
+    m = re.search(r"[0-9a-f]{32}", body.fish.lower())
+    if not m:
+        raise HTTPException(400, "Please paste the Fish Audio voice id or the address of its page")
+    voice_id = m.group(0)
+    if settings.fish_audio_key:  # check that the voice exists (reading the voice list costs nothing)
+        import httpx
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(f"https://api.fish.audio/model/{voice_id}",
+                                 headers={"Authorization": f"Bearer {settings.fish_audio_key}"})
+        if r.status_code == 404:
+            raise HTTPException(400, "Fish Audio does not know this voice id")
+    added = store.get_custom_voices()
+    if any(v["fish"] == voice_id and v["lang"] == body.lang for v in added) or any(
+            v["fish"] == voice_id for v in fish.VOICES[body.lang]):
+        raise HTTPException(409, "This voice is in the list already")
+    added.append({"lang": body.lang, "key": f"v{voice_id[:10]}", "name": body.name.strip(), "fish": voice_id})
+    store.save_custom_voices(added)
+    fish.forget_added_voices()
+    log_activity("admin", f"Voice added: {body.name.strip()} ({body.lang})", user_id=admin.id)
+    return {"added": added, "voices": fish.catalogue()}
+
+
+@app.delete("/api/admin/voices/{key}")
+def admin_delete_voice(key: str, admin: User = Depends(admin_user)):
+    added = store.get_custom_voices()
+    left = [v for v in added if v["key"] != key]
+    if len(left) == len(added):
+        raise HTTPException(404, "Unknown voice")
+    store.save_custom_voices(left)
+    fish.forget_added_voices()
+    cfg = store.get_settings()  # a removed default voice falls back to the standard default
+    reset = {k: v for k, v in (("voice_de", "jens"), ("voice_en", "jarvis")) if cfg[k] == key}
+    if reset:
+        store.save_settings(reset)
+    return {"added": left, "voices": fish.catalogue()}
 
 
 # ------------------------------------------------------------------ frontend

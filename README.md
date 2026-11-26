@@ -119,6 +119,10 @@ a GPU makes local models much faster. Ubuntu 22.04/24.04 + Docker.
 create users (each has their own conversations, memory and reminders), reset passwords, disable or delete
 accounts, and change Simon's name, home city, time zone, default language, default voices, speaking pace and
 extra instructions. The first account (created on the setup page) is the administrator.
+In the same place: **AI models** – add any OpenAI-compatible service with its key (ready-made entries for
+NVIDIA Build, OpenRouter, Groq, Cerebras, Gemini, Mistral, Ollama and LM Studio), test it, use it first or as
+a fallback, switch models off or remove them – and **Voices** – add any Fish Audio voice by pasting the
+address of its page on fish.audio.
 
 **Add a tool** – one function in `backend/app/tools.py`:
 

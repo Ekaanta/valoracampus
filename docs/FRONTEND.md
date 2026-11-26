@@ -57,7 +57,17 @@ questions:
   to answer, he stops and waits for the rest; both parts become one question, which replaces the half one.
 - **You talk over his answer:** he stops at once and answers what you said. He is told how much of his
   previous answer you heard, so he does not repeat it and can carry on from there ("go on").
-  The switch **Unterbrechen / Interrupt** under the input turns this off.
+
+**The input box** (two rows, like ChatGPT): new conversation and the voice chip (voice and speaking pace)
+on the left; on the right the **mic** for dictation (speak, the words appear in the box, nothing is sent
+until you press send) and the **mode button**: the speech bubble switches to text mode, the sound waves
+switch to voice mode and start the conversation. As soon as there is text in the box it becomes the send
+button.
+
+**Voice mode layout:** the title SIMON stays under the sphere; below it one line for your words and one
+line for Simon (bottom menu folded, no frame) or three lines in a rounded box (bottom menu shown). The lines
+have a fixed height, so nothing moves while the text changes. On phones and tablets the arrow under the
+input folds and unfolds the bottom menu; the choice is kept on the device.
 
 What you say is written out on the server (Whisper, via FreeLLMAPI or Groq). The microphone uses the
 browser's echo cancellation; what is left of Simon's own voice is measured against his current

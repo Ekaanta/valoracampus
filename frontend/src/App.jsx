@@ -179,6 +179,12 @@ function Shell() {
   const [activity, setActivity] = useState([])
   const [voices, setVoices] = useState(null) // voice picker choices from the server
   const [orb, setOrb] = useState('idle') // shared with the telemetry panel
+  // phones and tablets: the bottom menu can be folded away (the chosen state is kept on the device)
+  const [menuOpen, setMenuOpen] = useState(() => { try { return localStorage.getItem('simon_menu') !== 'folded' } catch { return true } })
+  const toggleMenu = () => {
+    setMenuOpen(!menuOpen)
+    try { localStorage.setItem('simon_menu', menuOpen ? 'folded' : 'open') } catch { /* private mode */ }
+  }
   const seen = useRef(new Set())
 
   const refreshConvs = useCallback(() => api('/conversations').then(setConvs).catch(() => {}), [])
@@ -233,7 +239,7 @@ function Shell() {
   const free = !stats?.paid_answers
 
   return (
-    <div className={`os view-${view}`}>
+    <div className={`os view-${view}${menuOpen ? '' : ' menu-folded'}`}>
       <header className="topbar hud">
         <Wordmark />
         <span className="edition">{t('edition')}</span>
@@ -289,7 +295,8 @@ function Shell() {
             ))}
           </div>
           {view === 'core' && (
-            <ChatView convId={convId} setConvId={setConvId} onChanged={refreshAll} orb={orb} setOrb={setOrb} onNew={() => open(null)} voices={voices} me={me} />
+            <ChatView convId={convId} setConvId={setConvId} onChanged={refreshAll} orb={orb} setOrb={setOrb} onNew={() => open(null)}
+                      voices={voices} me={me} menuFolded={!menuOpen} />
           )}
           {view === 'memory' && <MemoryPanel onBack={back} onChanged={refreshDeck} />}
           {view === 'activity' && <ActivityPanel onBack={back} />}
@@ -318,13 +325,21 @@ function Shell() {
         </aside>
       </div>
 
-      <nav className="tabbar" aria-label="Navigation">
-        {TABS.map(([k, label, icon]) => (
-          <button key={k} className={view === k ? 'active' : ''} onClick={() => setView(k)} aria-current={view === k ? 'page' : undefined}>
-            <Icon name={icon} size={20} /><span>{t(label)}</span>
-          </button>
-        ))}
-      </nav>
+      <div className="menu-dock">
+        {menuOpen && (
+          <nav className="tabbar" aria-label="Navigation">
+            {TABS.map(([k, label, icon]) => (
+              <button key={k} className={view === k ? 'active' : ''} onClick={() => setView(k)} aria-current={view === k ? 'page' : undefined}>
+                <Icon name={icon} size={20} /><span>{t(label)}</span>
+              </button>
+            ))}
+          </nav>
+        )}
+        <button className="menu-fold" onClick={toggleMenu} aria-expanded={menuOpen} aria-label={menuOpen ? t('menuHide') : t('menuShow')}
+                title={menuOpen ? t('menuHide') : t('menuShow')}>
+          <Icon name={menuOpen ? 'chevDown' : 'chevUp'} size={18} />
+        </button>
+      </div>
     </div>
   )
 }
@@ -332,6 +347,18 @@ function Shell() {
 /* ------------------------------------------------------------------ chat */
 const SUGGESTIONS = [['sWeather', 'qWeather'], ['sMarkets', 'qMarkets'], ['sReminder', 'qReminder'], ['sMemory', 'qMemory']]
 const STATES = ['idle', 'listening', 'thinking', 'speaking']
+
+/** True while the media query matches (e.g. the phone layout). */
+function useMedia(query) {
+  const [on, setOn] = useState(() => (typeof window !== 'undefined' && window.matchMedia ? window.matchMedia(query).matches : false))
+  useEffect(() => {
+    const mq = window.matchMedia(query)
+    const change = () => setOn(mq.matches)
+    mq.addEventListener('change', change)
+    return () => mq.removeEventListener('change', change)
+  }, [query])
+  return on
+}
 
 function greeting() {
   const h = new Date().getHours()
@@ -341,7 +368,7 @@ function greeting() {
 const timeOf = (m) => new Date(m.created_at || m.at || Date.now()).toLocaleTimeString(locale(), { hour: '2-digit', minute: '2-digit' })
 const toolLabel = (name) => (t(`t_${name}`) === `t_${name}` ? name : t(`t_${name}`))
 
-function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew, voices, me }) {
+function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew, voices, me, menuFolded }) {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
@@ -349,13 +376,14 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew, voices, me
   // A conversation (one tap on the sphere): the microphone stays open, like a phone call, until the next tap
   const [talk, setTalk] = useState(false)
   const talkRef = useRef(false)
-  // talking over Simon stops him and he answers what was said
-  const [bargeIn, setBargeInState] = useState(() => voicePrefs().bargeIn !== false)
-  const setBargeIn = (on) => { setBargeInState(on); setVoicePrefs({ bargeIn: on }) }
+  // the mic in the composer: speech to text into the message box (nothing is sent by itself)
+  const [dictating, setDictating] = useState(false)
+  const dictation = useRef(null)
+  const narrow = useMedia('(max-width: 1199px)') // phones and tablets: the bottom menu can be folded
   // voice: the sphere stays large and only the current words show below it; text: the full chat
   const [mode, setModeState] = useState(() => { try { return localStorage.getItem('simon_mode') || 'voice' } catch { return 'voice' } })
   const setMode = (m) => { setModeState(m); try { localStorage.setItem('simon_mode', m) } catch { /* private mode */ } }
-  const [spoken, setSpoken] = useState('') // subtitle under the sphere while Simon speaks
+  const [spoken, setSpoken] = useState(null) // { all, from, at }: what Simon has said so far; this piece starts at `from`
   const turnRef = useRef(0) // the latest send/replay; older ones must not reset the state
   const skipLoad = useRef(false)
   const listener = useRef(null) // one-time listening (browsers without the conversation microphone)
@@ -365,8 +393,6 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew, voices, me
   convRef.current = convId
   const busyRef = useRef(false) // callbacks from older renders must see the current value
   const markBusy = (on) => { busyRef.current = on; setBusy(on) }
-  const bargeInRef = useRef(bargeIn)
-  bargeInRef.current = bargeIn
   const abortRef = useRef(null) // stops the answer while it is still being written
   const heardRef = useRef('') // what Simon has already said aloud of the current answer
   const mic = useRef(null) // the open conversation microphone
@@ -425,7 +451,11 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew, voices, me
     const speaker = spoken || talkRef.current
       ? createSpeaker(speechLang(), {
         onStart: () => { ts.speakingSince = performance.now(); setOrb('speaking') },
-        onSentence: (s) => { heardRef.current += `${heardRef.current ? ' ' : ''}${s}`; setSpoken(s) },
+        onSentence: (s) => {
+          const before = heardRef.current
+          heardRef.current = before ? `${before} ${s}` : s
+          setSpoken({ all: heardRef.current, from: before ? before.length + 1 : 0, at: performance.now() })
+        },
       })
       : null
     const ctl = new AbortController()
@@ -443,7 +473,7 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew, voices, me
       if (speaker) {
         speaker.end()
         await speaker.done
-        if (turnRef.current === turn) setSpoken('')
+        if (turnRef.current === turn) setSpoken(null)
       }
       if (turnRef.current !== turn) return // a newer question, or the user cutting in, took over
       ts.speakingSince = 0
@@ -497,6 +527,7 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew, voices, me
     if (talkRef.current) return
     unlockAudio()
     setMode('voice')
+    if (dictation.current) stopDictation()
     if (!micSupported()) return startListening()
     talkRef.current = true
     setTalk(true)
@@ -543,16 +574,15 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew, voices, me
       stopSpeaking()
       ts.replay = false
       ts.speakingSince = 0
-      setSpoken('')
+      setSpoken(null)
     } else if (busyRef.current || ts.speakingSince) {
       const continuing = !ts.speakingSince || performance.now() - ts.speakingSince < 2500
-      if (!continuing && !bargeInRef.current) return false // talking over Simon is switched off
       ++turnRef.current // the answer that is cut off must not change the state any more
       abortRef.current?.abort()
       abortRef.current = null
       markBusy(false)
       stopSpeaking()
-      setSpoken('')
+      setSpoken(null)
       if (continuing) { // they had only paused: what comes now completes the last question
         ts.parts = [ts.lastQuestion, ...ts.parts].filter(Boolean)
         ts.replaceLast = true
@@ -633,7 +663,66 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew, voices, me
     setOrb('idle')
   }
 
+  /* The mic in the composer: dictation, like the microphone on a phone keyboard. Every pause writes the
+     words into the message box; nothing is sent until the user presses send. Tap again to finish. */
+  const stopDictation = () => {
+    const d = dictation.current
+    dictation.current = null
+    setDictating(false)
+    if (!d) return
+    clearTimeout(d.idle)
+    d.mic?.finish() // what was said last is still written out
+    d.mic?.close()
+    d.listen?.stop()
+  }
+
+  const addText = (text) => setInput((v) => (v.trim() ? `${v.trimEnd()} ${text}` : text))
+
+  const toggleDictation = async () => {
+    if (dictation.current) { stopDictation(); return }
+    if (talkRef.current) endTalk()
+    stopSpeaking()
+    unlockAudio()
+    const d = { mic: null, listen: null, idle: null, chain: Promise.resolve() }
+    dictation.current = d
+    setDictating(true)
+    const quiet = () => { // nobody talks for half a minute: stop
+      clearTimeout(d.idle)
+      d.idle = setTimeout(() => { if (dictation.current === d) stopDictation() }, 30000)
+    }
+    const browserWay = async () => { // without the server's speech-to-text: the browser's own recognition
+      let base = null
+      const join = (b, x) => (b.trim() ? `${b.trimEnd()} ${x}` : x)
+      d.listen = listen(speechLang(), { onInterim: (x) => setInput((v) => { if (base === null) base = v; return join(base, x) }) })
+      try {
+        const text = await d.listen.promise
+        if (text) setInput((v) => join(base ?? v, text))
+      } catch { /* no microphone */ }
+      if (dictation.current === d) { dictation.current = null; setDictating(false) }
+    }
+    if (micSupported()) {
+      const m = await openMic({
+        onSpeech: () => { quiet(); return true },
+        onUtterance: (wav, ms) => {
+          if (ms < MIC.minSpeechMs) return
+          d.chain = d.chain.then(async () => {
+            try {
+              const text = ((await transcribe(wav, speechLang().slice(0, 2))) || '').trim()
+              if (realSpeech(text)) addText(text)
+            } catch (x) {
+              if (x.status === 503 && dictation.current === d) { d.mic?.close(); d.mic = null; browserWay() }
+            }
+          })
+        },
+      })
+      if (dictation.current !== d) { m?.close(); return }
+      if (m) { d.mic = m; quiet(); return }
+    }
+    browserWay()
+  }
+
   const micClick = () => {
+    if (dictation.current) stopDictation()
     if (talkRef.current) { endTalk(); stopSpeaking(); return } // tap again: the conversation ends
     if (listener.current) { listener.current.stop(); return }
     if (orb === 'speaking') { stopSpeaking(); setOrb(busy ? 'thinking' : 'idle'); return }
@@ -654,11 +743,19 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew, voices, me
     const ts = talkState.current
     ts.replay = true
     setOrb('thinking')
-    await speak(text, speechLang(), { onStart: () => { ts.speakingSince = performance.now(); setOrb('speaking') }, onSentence: setSpoken })
+    let said = ''
+    await speak(text, speechLang(), {
+      onStart: () => { ts.speakingSince = performance.now(); setOrb('speaking') },
+      onSentence: (piece) => {
+        const from = said ? said.length + 1 : 0
+        said = said ? `${said} ${piece}` : piece
+        setSpoken({ all: said, from, at: performance.now() })
+      },
+    })
     if (turnRef.current !== turn) return
     ts.replay = false
     ts.speakingSince = 0
-    setSpoken('')
+    setSpoken(null)
     setOrb(talkRef.current ? 'listening' : 'idle')
   }
 
@@ -676,8 +773,9 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew, voices, me
     e?.preventDefault()
     const text = input.trim()
     if (!text || busy) return
+    if (dictation.current) stopDictation()
     setInput('')
-    setMode('text')
+    if (!talkRef.current) setMode('text') // typing in a running conversation keeps the voice view
     send(text)
   }
 
@@ -689,8 +787,12 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew, voices, me
   const voiceMode = !empty && mode === 'voice'
   const hint = t(`h_${orb}`)
   const lastAi = [...messages].reverse().find((m) => m.role === 'assistant')
-  const subtitle = orb === 'speaking' && spoken ? spoken.replace(/[*_#>`]/g, '').replace(/\s+/g, ' ').trim() : ''
+  const subtitle = orb === 'speaking' && spoken ? spoken.all.slice(spoken.from) : ''
   const caption = interim || subtitle || (orb === 'thinking' ? (lastAi?.status || t('thinking')) : null)
+
+  // the round button on the right of the composer: send (when there is text), else switch voice <-> text
+  const toVoice = () => { setMode('voice'); if (!talkRef.current) startTalk() }
+  const toText = () => { setMode('text'); if (talkRef.current) endTalk() }
 
   return (
     <div className={empty || voiceMode ? 'core welcome' : 'core live'}>
@@ -700,20 +802,11 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew, voices, me
             <Sphere state={orb} />
           </button>
           <div className="stage-text">
-            {empty && <p className="core-name" aria-hidden="true">SIMON</p>}
+            {(empty || voiceMode) && <p className="core-name" aria-hidden="true">SIMON</p>}
             <div className="pill-row">
               <div className="states" role="status" aria-label={t(`s_${orb}`)}>
                 {STATES.map((s) => <span key={s} className={s === orb ? `on ${s}` : ''}>{t(`s_${s}`)}</span>)}
               </div>
-              {!empty && (
-                <button className="new-session" onClick={() => setMode(voiceMode ? 'text' : 'voice')}
-                        title={voiceMode ? t('toText') : t('toVoice')}>
-                  <Icon name={voiceMode ? 'chat' : 'core'} size={13} /> {voiceMode ? t('modeText') : t('modeVoice')}
-                </button>
-              )}
-              {!empty && (
-                <button className="new-session" onClick={onNew} title={t('startNew')}><Icon name="plus" size={13} /> {t('new')}</button>
-              )}
             </div>
             {empty ? (
               <>
@@ -721,8 +814,8 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew, voices, me
                 <p className="welcome-sub">{t('welcomeSub', { hint })}</p>
               </>
             ) : voiceMode ? (
-              <VoiceStrip messages={messages} orb={orb} interim={interim} spoken={subtitle} hint={hint}
-                          onOpenText={() => setMode('text')} />
+              <VoiceStrip messages={messages} orb={orb} interim={interim} spoken={spoken} hint={hint}
+                          lines={menuFolded && narrow ? 1 : 3} onOpenText={toText} />
             ) : (
               <p className="caption" aria-live="polite">{caption || hint}</p>
             )}
@@ -801,24 +894,31 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew, voices, me
       </div>
 
       <form className="composer" onSubmit={submit}>
-        <div className={`composer-box ${orb}`}>
-          <button type="button" className={`mic ${orb}`} onClick={micClick} aria-label={hint} title={hint}>
-            <Icon name={talk || orb === 'listening' ? 'stop' : orb === 'speaking' ? 'speaker' : 'mic'} size={18} />
-          </button>
+        <div className={`composer-box ${dictating ? 'dictating' : orb}`}>
           <textarea ref={textarea} rows={1} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={onKey}
-                    placeholder={orb === 'listening' ? t('listeningPh') : t('placeholder')} aria-label={t('message')} />
-          <button className="send" disabled={busy || !input.trim()} aria-label={t('send')}><Icon name="arrowUp" size={18} /></button>
-        </div>
-        <div className="composer-meta">
-          {micSupported() && (
-            <label className="switch" title={t('bargeInHint')}>
-              <input type="checkbox" checked={bargeIn} onChange={(e) => setBargeIn(e.target.checked)} />
-              <span className="track"><span className="thumb" /></span>
-              {t('bargeIn')}
-            </label>
-          )}
-          <VoicePicker voices={voices} onPreview={() => speakAgain(t('voiceSample'))} />
-          <span className="hint">{t('enterHint')}</span>
+                    placeholder={dictating ? t('dictatingPh') : orb === 'listening' ? t('listeningPh') : t('placeholder')} aria-label={t('message')} />
+          <div className="composer-row" onMouseDown={(e) => { if (e.target.closest('button') && document.activeElement === textarea.current) e.preventDefault() }}>
+            <button type="button" className="cbtn" onClick={onNew} aria-label={t('startNew')} title={t('startNew')}>
+              <Icon name="chatPlus" size={19} />
+            </button>
+            <VoiceChip voices={voices} onPreview={() => speakAgain(t('voiceSample'))} />
+            <span className="grow" />
+            <button type="button" className={dictating ? 'cbtn rec' : 'cbtn'} onClick={toggleDictation}
+                    aria-label={dictating ? t('dictateStop') : t('dictate')} title={dictating ? t('dictateStop') : t('dictate')}>
+              <Icon name={dictating ? 'check' : 'mic'} size={19} />
+            </button>
+            {input.trim() ? (
+              <button className="send" disabled={busy} aria-label={t('send')} title={t('send')}><Icon name="arrowUp" size={18} /></button>
+            ) : voiceMode || (empty && mode === 'voice') ? (
+              <button type="button" className="cbtn mode" onClick={toText} aria-label={t('toText')} title={t('toText')}>
+                <Icon name="chatText" size={19} />
+              </button>
+            ) : (
+              <button type="button" className="cbtn mode" onClick={toVoice} aria-label={t('toVoice')} title={t('toVoice')}>
+                <Icon name="wave" size={19} />
+              </button>
+            )}
+          </div>
         </div>
       </form>
     </div>
@@ -827,26 +927,61 @@ function ChatView({ convId, setConvId, onChanged, orb, setOrb, onNew, voices, me
 
 const speakable = (text) => (text || '').replace(/\|/g, ' ').replace(/[*_#>`]/g, '').replace(/\s+/g, ' ').trim()
 
+/** The text from a word boundary near `from` (with "… " in front when it does not start at the beginning). */
+function windowFrom(text, from) {
+  if (from <= 0) return text
+  const cut = text.lastIndexOf(' ', from)
+  return cut <= 0 ? text : `… ${text.slice(cut + 1)}`
+}
+
 /**
- * Voice mode: under the large sphere only the current exchange — your last words and what Simon
- * is saying right now (or the end of his last answer). Charts and confirmations open text mode.
+ * Voice mode: under the large sphere, your last words (one line) and what Simon is saying (one or three
+ * lines). The lines have a fixed height, so nothing moves while the text changes. While Simon speaks
+ * the window follows his voice (estimated from his speaking pace); afterwards it shows the end of his answer.
  */
-function VoiceStrip({ messages, orb, interim, spoken, hint, onOpenText }) {
+function VoiceStrip({ messages, orb, interim, spoken, hint, lines, onOpenText }) {
+  const box = useRef(null)
+  const [perLine, setPerLine] = useState(40) // characters that fit in one line
+  const [, tick] = useState(0)
+  useEffect(() => {
+    const el = box.current
+    if (!el) return undefined
+    const measure = () => {
+      const p = el.querySelector('.vs-simon')
+      const size = p ? parseFloat(getComputedStyle(p).fontSize) : 18
+      setPerLine(Math.max(16, Math.floor((p?.clientWidth || el.clientWidth) / (size * 0.52))))
+    }
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+  useEffect(() => { // move the window along while he speaks
+    if (orb !== 'speaking' || !spoken) return undefined
+    const timer = setInterval(() => tick((n) => n + 1), 250)
+    return () => clearInterval(timer)
+  }, [orb, spoken])
+
   const lastUser = [...messages].reverse().find((m) => m.role === 'user')
   const lastAi = [...messages].reverse().find((m) => m.role === 'assistant')
   let simon = ''
-  if (orb === 'speaking' && spoken) simon = spoken
-  else if (orb === 'thinking') simon = lastAi?.status || t('thinking')
+  if (orb === 'speaking' && spoken) {
+    const pace = 14 * ((voicePrefs().speed || 0.9) / 0.9) // characters per second
+    const piece = spoken.all.length - spoken.from
+    const at = spoken.from + Math.min(piece, ((performance.now() - spoken.at) / 1000) * pace)
+    // start at the beginning of this piece; once he has said more than half of what fits, move along with him
+    simon = windowFrom(spoken.all, Math.max(spoken.from, Math.floor(at - perLine * lines * 0.45)))
+  } else if (orb === 'thinking') simon = lastAi?.status || t('thinking')
   else if (lastAi?.error) simon = lastAi.error
   else if (lastAi?.content) {
     const all = speakable(lastAi.content)
-    simon = all.length > 220 ? `… ${all.slice(-220).replace(/^\S*\s/, '')}` : all
+    simon = windowFrom(all, all.length - Math.floor(perLine * lines * 0.85))
   }
   const pending = lastAi?.cards?.some((c) => c.type === 'approval' && c.action?.status === 'pending')
   const hasCard = pending || lastAi?.cards?.length > 0
   return (
-    <div className="voice-strip" aria-live="polite">
-      {(interim || lastUser) && <p className={interim ? 'vs-user live' : 'vs-user'}>{interim || lastUser.content}</p>}
+    <div ref={box} className={`voice-strip lines-${lines}`} aria-live="polite">
+      <p className={interim ? 'vs-user live' : 'vs-user'}>{interim || lastUser?.content || ' '}</p>
       <p className="vs-simon">{simon || hint}</p>
       {hasCard && (
         <button className={pending ? 'vs-card pending' : 'vs-card'} onClick={onOpenText}>
@@ -857,26 +992,52 @@ function VoiceStrip({ messages, orb, interim, spoken, hint, onOpenText }) {
   )
 }
 
-/** Voice and speaking speed for the current language; a short sample plays after every change. */
-function VoicePicker({ voices, onPreview }) {
+/** The voice chip in the composer: the chosen voice; it opens the voice list and the speaking pace. */
+function VoiceChip({ voices, onPreview }) {
   const [lang] = useLang()
   const [prefs, setPrefs] = useState(voicePrefs)
+  const [open, setOpen] = useState(false)
+  const wrap = useRef(null)
+  useEffect(() => {
+    if (!open) return undefined
+    const away = (e) => { if (!wrap.current?.contains(e.target)) setOpen(false) }
+    const esc = (e) => { if (e.key === 'Escape') setOpen(false) }
+    document.addEventListener('pointerdown', away)
+    document.addEventListener('keydown', esc)
+    return () => { document.removeEventListener('pointerdown', away); document.removeEventListener('keydown', esc) }
+  }, [open])
   const list = voices?.[lang] || []
   if (!list.length) return null
   const voice = list.some((v) => v.key === prefs[lang]) ? prefs[lang] : (voices[`default_${lang}`] || list[0].key)
   const speed = voices.speeds.includes(prefs.speed) ? prefs.speed : voices.default_speed
   const change = (patch) => { setPrefs(setVoicePrefs(patch)); onPreview() }
   const speedNames = [t('speedCalm'), t('speedNormal'), t('speedBrisk')]
+  const current = list.find((v) => v.key === voice)
   return (
-    <span className="voice-picker">
-      <Icon name="speaker" size={14} />
-      <select value={voice} onChange={(e) => change({ [lang]: e.target.value })} aria-label={t('voiceLabel')} title={t('voiceLabel')}>
-        {list.map((v) => <option key={v.key} value={v.key}>{v.fish ? v.name : `${v.name} · ${t('standardVoice')}`}</option>)}
-      </select>
-      <select value={speed} onChange={(e) => change({ speed: Number(e.target.value) })} aria-label={t('speedLabel')} title={t('speedLabel')}>
-        {voices.speeds.map((s, i) => <option key={s} value={s}>{speedNames[i] || s}</option>)}
-      </select>
-    </span>
+    <div className="voice-chip-wrap" ref={wrap}>
+      <button type="button" className="voice-chip" onClick={() => setOpen(!open)} aria-expanded={open}
+              aria-label={`${t('voiceLabel')}: ${current?.name}`} title={t('voiceLabel')}>
+        <span>{current?.name}</span><Icon name={open ? 'chevDown' : 'chevUp'} size={13} />
+      </button>
+      {open && (
+        <div className="voice-menu" role="dialog" aria-label={t('voiceLabel')}>
+          <p className="vm-title">{t('voiceLabel')}</p>
+          <div className="vm-list">
+            {list.map((v) => (
+              <button type="button" key={v.key} className={v.key === voice ? 'on' : ''} onClick={() => change({ [lang]: v.key })}>
+                {v.name}{v.fish ? '' : <small> · {t('standardVoice')}</small>}
+              </button>
+            ))}
+          </div>
+          <p className="vm-title">{t('speedLabel')}</p>
+          <div className="vm-speeds">
+            {voices.speeds.map((s, i) => (
+              <button type="button" key={s} className={s === speed ? 'on' : ''} onClick={() => change({ speed: s })}>{speedNames[i] || s}</button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
   )
 }
 

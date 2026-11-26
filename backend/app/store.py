@@ -27,6 +27,43 @@ def defaults() -> dict:
     }
 
 
+MODELS_KEY = "ai_models"  # {"custom": [...], "off": [...]}: models the administrator added or switched off
+VOICES_KEY = "custom_voices"  # [{"lang", "key", "name", "fish"}]: Fish Audio voices the administrator added
+
+
+def _read(key: str, default):
+    with SessionLocal() as s:
+        row = s.get(Setting, key)
+        return row.value if row else default
+
+
+def _write(key: str, value) -> None:
+    with SessionLocal() as s:
+        row = s.get(Setting, key)
+        if row:
+            row.value, row.updated_at = value, utcnow()
+        else:
+            s.add(Setting(key=key, value=value))
+        s.commit()
+
+
+def get_models() -> dict:
+    value = _read(MODELS_KEY, {}) or {}
+    return {"custom": list(value.get("custom", [])), "off": list(value.get("off", []))}
+
+
+def save_models(value: dict) -> None:
+    _write(MODELS_KEY, {"custom": value.get("custom", []), "off": sorted(set(value.get("off", [])))})
+
+
+def get_custom_voices() -> list:
+    return list(_read(VOICES_KEY, []) or [])
+
+
+def save_custom_voices(value: list) -> None:
+    _write(VOICES_KEY, value)
+
+
 def get_settings() -> dict:
     with SessionLocal() as s:
         stored = {r.key: r.value for r in s.scalars(select(Setting)).all() if not r.key.startswith("_")}
@@ -55,9 +92,9 @@ def _clean(key: str, value):
             raise ValueError(f"unknown time zone: {value}") from err
         return str(value)
     if key in ("voice_de", "voice_en"):
-        from .voice import VOICES
+        from .voice import all_voices
         lang = key[-2:]
-        if value not in {v["key"] for v in VOICES[lang]}:
+        if value not in {v["key"] for v in all_voices()[lang]}:
             raise ValueError(f"unknown voice: {value}")
         return value
     if key == "allow_signup":

@@ -208,6 +208,160 @@ export function AccountPanel({ me, onBack, onAdmin }) {
   )
 }
 
+/* ------------------------------------------------------------------ administration: AI models */
+function TestResult({ r }) {
+  if (!r) return null
+  return <small className={r.busy ? 'test-res' : r.ok ? 'test-res ok' : 'test-res bad'}>
+    {r.busy ? t('testing') : r.ok ? t('testOk', { s: r.seconds }) : t('testBad', { e: r.error })}
+  </small>
+}
+
+function ModelsSection() {
+  const [data, setData] = useState(null)
+  const [draft, setDraft] = useState(null) // the "add model" form (null: closed)
+  const [msg, setMsg] = useState(null)
+  const [tests, setTests] = useState({})
+  useEffect(() => { api('/admin/models').then(setData).catch(() => {}) }, [])
+  if (!data) return null
+  const choose = (id) => {
+    const p = data.presets.find((x) => x.id === id) || data.presets[0]
+    setDraft({ preset: p.id, name: p.name, base_url: p.base_url, model: p.model, api_key: '', first: false, paid: false, key_url: p.key_url, hint: p.hint })
+    setTests((s) => ({ ...s, draft: null }))
+    setMsg(null)
+  }
+  const set = (patch) => setDraft({ ...draft, ...patch })
+  const change = async (m, body) => {
+    try { const r = await api(`/admin/models/${encodeURIComponent(m.key)}`, { method: 'PATCH', body }); setData({ ...data, models: r.models }) } catch (x) { alert(x.status === 400 ? t('keepOne') : x.message) }
+  }
+  const remove = async (m) => {
+    if (!confirm(t('delModel', { name: m.name }))) return
+    try { const r = await api(`/admin/models/${encodeURIComponent(m.key)}`, { method: 'DELETE' }); setData({ ...data, models: r.models }) } catch (x) { alert(x.message) }
+  }
+  const test = async (key, body) => {
+    setTests((s) => ({ ...s, [key]: { busy: true } }))
+    try { const r = await api('/admin/models/test', { method: 'POST', body }); setTests((s) => ({ ...s, [key]: r })) } catch (x) { setTests((s) => ({ ...s, [key]: { ok: false, error: x.message } })) }
+  }
+  const add = async (e) => {
+    e.preventDefault()
+    try {
+      const { name, base_url, api_key, model, first, paid } = draft
+      const r = await api('/admin/models', { method: 'POST', body: { name, base_url, api_key, model, first, paid } })
+      setData({ ...data, models: r.models })
+      setDraft(null)
+      setMsg({ text: t('modelAdded') })
+    } catch (x) {
+      setMsg({ bad: true, text: x.status === 409 ? t('nameTaken') : x.message })
+    }
+  }
+  return (
+    <Panel title={t('modelsTitle')} meta={data.models.filter((m) => m.enabled).length}>
+      <p className="panel-note">{t('modelsSub')}</p>
+      <ul className="user-list model-list">
+        {data.models.map((m) => (
+          <li key={m.key} className={m.enabled ? '' : 'off'}>
+            <span className="avatar"><Icon name={m.custom ? 'plug' : 'cpu'} size={16} /></span>
+            <span className="user-main">
+              <b>{m.name}</b>
+              <small>{m.model}</small>
+              <small>{[m.custom ? t('addedTag') : t('builtIn'), m.custom && m.first && !m.paid && t('firstTag'), m.paid && t('paidTag'),
+                m.key_hint && `${t('f_key')} ${m.key_hint}`, !m.enabled && t('offTag')].filter(Boolean).join(' · ')}</small>
+              <TestResult r={tests[m.key]} />
+            </span>
+            <span className="user-actions">
+              <button className="btn small" onClick={() => test(m.key, { key: m.key })}>{t('testModel')}</button>
+              {m.custom && !m.paid && <button className="btn small" onClick={() => change(m, { first: !m.first })}>{m.first ? t('useLater') : t('useFirst')}</button>}
+              <button className="btn small" onClick={() => change(m, { enabled: !m.enabled })}>{m.enabled ? t('turnOff') : t('turnOn')}</button>
+              {m.custom && <button className="icon-btn danger" onClick={() => remove(m)} aria-label={t('delete')} title={t('delete')}><Icon name="trash" size={16} /></button>}
+            </span>
+          </li>
+        ))}
+      </ul>
+      {draft ? (
+        <form className="form-grid new-user" onSubmit={add}>
+          <label className="field"><span>{t('f_preset')}</span>
+            <select value={draft.preset} onChange={(e) => choose(e.target.value)}>
+              {data.presets.map((p) => <option key={p.id} value={p.id}>{p.name || t('customService')}</option>)}
+            </select></label>
+          <label className="field"><span>{t('f_mname')}</span><input value={draft.name} onChange={(e) => set({ name: e.target.value })} /></label>
+          <label className="field wide"><span>{t('f_url')}</span>
+            <input value={draft.base_url} placeholder="https://…/v1" autoCapitalize="none" onChange={(e) => set({ base_url: e.target.value })} /></label>
+          <label className="field"><span>{t('f_model')}</span>
+            <input value={draft.model} placeholder={draft.hint || ''} autoCapitalize="none" onChange={(e) => set({ model: e.target.value })} /></label>
+          <label className="field"><span>{t('f_key')}</span>
+            <input type="password" value={draft.api_key} autoComplete="off" onChange={(e) => set({ api_key: e.target.value })} />
+            {draft.key_url && <a className="field-link" href={draft.key_url} target="_blank" rel="noreferrer">{t('getKey')}</a>}</label>
+          <label className="check wide"><input type="checkbox" checked={draft.first} onChange={(e) => set({ first: e.target.checked })} /><span>{t('f_first')}</span></label>
+          <label className="check wide"><input type="checkbox" checked={draft.paid} onChange={(e) => set({ paid: e.target.checked })} /><span>{t('f_paid')}</span></label>
+          <div className="form-actions">
+            <button type="button" className="btn" disabled={!draft.base_url || !draft.model}
+                    onClick={() => test('draft', { base_url: draft.base_url, api_key: draft.api_key, model: draft.model })}>{t('testModel')}</button>
+            <button className="btn primary" disabled={!draft.name || !draft.base_url || !draft.model}><Icon name="plus" size={16} /> {t('addModel')}</button>
+            <button type="button" className="btn ghost" onClick={() => setDraft(null)}>{t('cancel')}</button>
+            <TestResult r={tests.draft} />
+            {msg && <span className={msg.bad ? 'form-msg bad' : 'form-msg'}>{msg.text}</span>}
+          </div>
+        </form>
+      ) : (
+        <div className="form-actions new-user">
+          <button className="btn primary" onClick={() => choose(data.presets[0].id)}><Icon name="plus" size={16} /> {t('addModel')}</button>
+          {msg && <span className={msg.bad ? 'form-msg bad' : 'form-msg'}>{msg.text}</span>}
+        </div>
+      )}
+    </Panel>
+  )
+}
+
+/* ------------------------------------------------------------------ administration: voices */
+function VoicesSection({ onChanged }) {
+  const [added, setAdded] = useState([])
+  const [draft, setDraft] = useState({ lang: 'de', name: '', fish: '' })
+  const [msg, setMsg] = useState(null)
+  useEffect(() => { api('/admin/voices').then((r) => setAdded(r.added)).catch(() => {}) }, [])
+  const add = async (e) => {
+    e.preventDefault()
+    try {
+      const r = await api('/admin/voices', { method: 'POST', body: draft })
+      setAdded(r.added)
+      setDraft({ ...draft, name: '', fish: '' })
+      setMsg({ text: t('voiceAdded') })
+      onChanged?.()
+    } catch (x) { setMsg({ bad: true, text: x.message }) }
+  }
+  const remove = async (v) => {
+    if (!confirm(t('delVoice', { name: v.name }))) return
+    try { const r = await api(`/admin/voices/${v.key}`, { method: 'DELETE' }); setAdded(r.added); onChanged?.() } catch (x) { alert(x.message) }
+  }
+  return (
+    <Panel title={t('voicesTitle')} meta={added.length}>
+      <p className="panel-note">{t('voicesSub')}</p>
+      {added.length ? (
+        <ul className="user-list">
+          {added.map((v) => (
+            <li key={v.key}>
+              <span className="avatar"><Icon name="speaker" size={16} /></span>
+              <span className="user-main"><b>{v.name}</b><small>{v.lang.toUpperCase()} · {v.fish}</small></span>
+              <span className="user-actions">
+                <button className="icon-btn danger" onClick={() => remove(v)} aria-label={t('delete')} title={t('delete')}><Icon name="trash" size={16} /></button>
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : <p className="hud-empty">{t('noAddedVoices')}</p>}
+      <form className="form-grid new-user" onSubmit={add}>
+        <label className="field"><span>{t('f_vname')}</span><input value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} /></label>
+        <label className="field"><span>{t('f_vlang')}</span>
+          <select value={draft.lang} onChange={(e) => setDraft({ ...draft, lang: e.target.value })}><option value="de">Deutsch</option><option value="en">English</option></select></label>
+        <label className="field wide"><span>{t('f_vurl')}</span>
+          <input value={draft.fish} placeholder="https://fish.audio/m/…" autoCapitalize="none" onChange={(e) => setDraft({ ...draft, fish: e.target.value })} /></label>
+        <div className="form-actions">
+          <button className="btn primary" disabled={!draft.name || draft.fish.length < 32}><Icon name="plus" size={16} /> {t('addVoice')}</button>
+          {msg && <span className={msg.bad ? 'form-msg bad' : 'form-msg'}>{msg.text}</span>}
+        </div>
+      </form>
+    </Panel>
+  )
+}
+
 /* ------------------------------------------------------------------ administration (admins only) */
 const SPEED_KEYS = { 0.82: 'speedCalm', 0.9: 'speedNormal', 1: 'speedBrisk' }
 
@@ -220,9 +374,10 @@ export function AdminPanel({ me, onBack, onSettingsChanged }) {
   const [cfgMsg, setCfgMsg] = useState(null)
 
   const loadUsers = () => api('/admin/users').then(setUsers).catch(() => {})
+  const loadSettings = () => api('/admin/settings').then((r) => { setCfg(r.settings); setVoices(r.voices) }).catch(() => {})
   useEffect(() => {
     loadUsers()
-    api('/admin/settings').then((r) => { setCfg(r.settings); setVoices(r.voices) }).catch(() => {})
+    loadSettings()
   }, [])
 
   const create = async (e) => {
@@ -332,6 +487,9 @@ export function AdminPanel({ me, onBack, onSettingsChanged }) {
           </form>
         </Panel>
       )}
+
+      <ModelsSection />
+      <VoicesSection onChanged={() => { onSettingsChanged?.(); api('/admin/settings').then((r) => setVoices(r.voices)).catch(() => {}) }} />
     </div>
   )
 }
